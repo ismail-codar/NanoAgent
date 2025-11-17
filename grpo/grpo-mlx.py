@@ -8,7 +8,9 @@ import re
 import sys
 from difflib import SequenceMatcher
 from pathlib import Path
+from collections import defaultdict
 
+from semhash import SemHash
 import matplotlib
 import matplotlib.pyplot as plt
 import mlx.core as mx
@@ -16,6 +18,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 import tqdm
+import random
 from mlx.utils import tree_flatten, tree_unflatten
 from mlx_lm import generate, load
 from mlx_lm.utils import load_model, save_model
@@ -34,24 +37,25 @@ from utils.webtool import tool_call_extract
 @dataclass
 class TrainConfig:
     # Iterations
-    ITERS = 15_000
+    ITERS = 8_000
     GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 384
     SAVE_FREQ = 50
     # Weight checkpoint
-    LOAD_PREV = True
+    LOAD_PREV = False
     # Learning rate
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 2e-6
     WEIGHT_DECAY = 0.0
     EPSILON = 0.2
     GROUP_SIZE = 4
-    WARMUP_STEPS = int(ITERS * 0.1)
+    WARMUP_STEPS = 100 #int(ITERS * 0.1)
+    DECAY_STEPS = 100
     BETA = 0  # 0.04
     UPDATE_WEIGHT = 0.05
-    MAX_INPUT_LEN = 384
-    SAVE_PATH = "weights/SmolLM2-135M-mlx-grpo-v0"
-    DATA_PATH = "data/datasets/grpo_v0.json"
+    MAX_INPUT_LEN = 384 # 512
+    SAVE_PATH = "weights/SmolLM2-135M-mlx-grpo-v3"
+    DATA_PATH = "data/datasets/grpo_v3.json"
     TQDM = True
 
 
@@ -106,10 +110,37 @@ def cosine_decay_with_warmup(
     return schedule
 
 
-scheduler = cosine_decay_with_warmup(
-    max_lr=TrainConfig.LEARNING_RATE,
+def linear_decay_with_warmup(
+    base_lr: float,
+    total_steps: int,
+    warmup_steps: int,
+    decay_steps: int,
+):
+    assert total_steps - warmup_steps - decay_steps > 0
+    def schedule(step):
+        # Linear warmup
+        warmup_lr = base_lr * step / warmup_steps
+        # Linear decay
+        decay_lr = base_lr * (step - (total_steps - decay_steps)) / decay_steps
+        return mx.where(
+            step < warmup_steps,
+            warmup_lr,
+            mx.where(step >= (total_steps - decay_steps), decay_lr, base_lr))
+
+    return schedule
+
+
+# scheduler = cosine_decay_with_warmup(
+#     max_lr=TrainConfig.LEARNING_RATE,
+#     total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
+#     warmup_steps=TrainConfig.WARMUP_STEPS,
+# )
+
+scheduler = linear_decay_with_warmup(
+    base_lr=TrainConfig.LEARNING_RATE,
     total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
     warmup_steps=TrainConfig.WARMUP_STEPS,
+    decay_steps=TrainConfig.DECAY_STEPS
 )
 
 optimizer = optim.AdamW(
@@ -133,10 +164,10 @@ def grad_checkpoint(layer):
     type(layer).__call__ = checkpointed_fn
 
 
-for layer in model.layers[:6]:
-    grad_checkpoint(layer)
-for layer in model_old.layers[:6]:
-    grad_checkpoint(layer)
+# for layer in model.layers[:6]:
+#     grad_checkpoint(layer)
+# for layer in model_old.layers[:6]:
+#     grad_checkpoint(layer)
 
 
 print(
@@ -197,12 +228,19 @@ def salesfores_tool_ds():
                 + " Think before answering.",
             },
             {"role": "user", "content": data["query"]},
-            {"role": "assistant", "content": "<think>"},
+            {"role": "assistant", "content": f"<think>I see I have access to these set of tools: {[t['name'] for t in tools]}."},
             # Assistant response hidden
             # {'role': 'assistant', 'content': f'<tool_call>{tool_calls}</tool_call>'}
         ]
         return {
+            "prompt": tokenizer.apply_chat_template(
+                seq,
+                add_generation_prompt=False,
+                tokenize=False,
+                continue_final_message=True,
+            ),
             "messages": seq,
+            "def_tools": tools,
             "ground_tool_call": tool_calls,
             "num_input_tools": len(tools),
         }
@@ -219,7 +257,6 @@ def total_tokens(data):
         )  # add_generation_prompt=True)
     )
 
-
 def tool_tokens(ground_tool_call):
     ntokens = len(tokenizer.encode(json.dumps(ground_tool_call)))
     return ntokens
@@ -227,6 +264,10 @@ def tool_tokens(ground_tool_call):
 
 if TrainConfig.GENERATE_DATA:
     train_ds = salesfores_tool_ds()
+    semhash = SemHash.from_records(train_ds, columns=['prompt'])
+    train_ds = semhash.self_deduplicate(threshold=0.995)
+    print("Dedup ratio:", train_ds.duplicate_ratio)
+    train_ds = train_ds.selected
     train_ds = list(
         filter(
             lambda x: total_tokens(x) < TrainConfig.MAX_INPUT_LEN
@@ -234,11 +275,14 @@ if TrainConfig.GENERATE_DATA:
             train_ds,
         )
     )
+    # train_ds.sort(
+    #     key=lambda x: (x["num_input_tools"], len(json.dumps(x["ground_tool_call"])))
+    # )
     train_ds.sort(
-        key=lambda x: (x["num_input_tools"], len(json.dumps(x["ground_tool_call"])))
+        key=lambda x: (len(json.dumps(x["ground_tool_call"])), x["num_input_tools"])
     )
-    # Mixing 250 easy samples
-    train_ds = train_ds[:250] + train_ds[-(TrainConfig.ITERS-250):]
+    train_ds = train_ds[:TrainConfig.ITERS]
+    random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
     with open(TrainConfig.DATA_PATH, "w") as f:
         json.dump(train_ds, f, indent=2)
@@ -292,37 +336,79 @@ def validate_format(text):
     pattern = re.compile(
         r"^\s*<think>.*?</think>\s*<tool_call>.*?</tool_call>\s*$", re.DOTALL
     )
-    return bool(pattern.match(text))
+    return bool(pattern.match(text)) \
+        and (text.count("</think>") == 1) \
+        and (text.count("<tool_call>") == 1) \
+        and (text.count("</tool_call>") == 1)
 
 
-def _scorer(tools_gen, tools_ground, verbose=False):
+def tool_scorer(llm_gen, tools_ground, verbose=False):
+    def uniform(s:str):
+        return sorted(list(s.lower()))
+
     if verbose:
-        print("Gen tools:", type(tools_gen), json.dumps(tools_gen))
+        print("Gen tools:", type(llm_gen), json.dumps(llm_gen))
         print("Ground tools:", type(tools_ground), json.dumps(tools_ground))
 
-    if isinstance(tools_gen, str):
-        tools_gen = tool_call_extract(tools_gen)
-        if verbose:
-            print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
-        if tools_gen is None:
-            return -1.0
+    assert isinstance(llm_gen, str)
+    tools_gen = tool_call_extract(llm_gen)
+    if verbose:
+        print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
+    # Invalid tool calling format
+    if tools_gen is None:
+        return -1, None
+    for tool in tools_gen:
+        if not isinstance(tool, dict):
+            return -1, None
+        if 'name' not in tool or 'arguments' not in tool:
+            return -1, None
 
     a = str(tools_gen)
     b = str(tools_ground)
+
+    if uniform(a) == uniform(b):
+        return 2, tools_gen
+
     s = SequenceMatcher(None, a, b)
-    return s.ratio() + (s.find_longest_match().size / len(b))
+    return s.ratio() + (s.find_longest_match().size / len(b)), tools_gen
 
 
-def scorer(llm_gen, tools_ground, verbose=False):
-    valid_format = validate_format("<think>" + llm_gen)
+def thinking_scorer(llm_gen, tools_gen, def_tools):
+    pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    think = pattern.findall(llm_gen)
+    if not think or tools_gen is None: return -1
+    think = think[0]
+    if '?' in think: return -1
+
+    # Length normalize
+    tools_ground_norm = str(tools_gen)
+    think_wrt_ground = think * max(len(tools_ground_norm) // len(think), 1)
+    tools_wrt_think = tools_ground_norm * max(len(think_wrt_ground) // len(think), 1)
+    matcher = SequenceMatcher(None, think_wrt_ground, tools_wrt_think)
+    
+    if len(matcher.get_matching_blocks()) >= 2 * len(tools_gen):
+        return 1
+    return -1
+
+
+def scorer(llm_gen, tools_ground, def_tools, verbose=False):
+    # Adding think tag (prefilled in dataset)
+    llm_gen = "<think>" + llm_gen
+
+    # Validate format
+    valid_format = validate_format(llm_gen)
     if not valid_format:
         return -1
-    gen = tool_call_extract(llm_gen)
-    if gen is None:
-        return -0.5
-    if not isinstance(gen, list):
-        gen = [gen]
-    return _scorer(gen, tools_ground, verbose)
+    # Tool score
+    tool_score, tools_gen = tool_scorer(llm_gen, tools_ground)
+    if tool_score < 0:
+        return -1
+    # Think score: checking if the executing tool was mentioned
+    think_score = thinking_scorer(llm_gen, tools_gen, def_tools)
+    if think_score <= 0:
+        return -1
+
+    return tool_score + think_score
 
 
 
@@ -679,6 +765,7 @@ def grpo_train_loop(
                 continue_final_message=True,
             )
             ground_tool_call = train_set[i]["ground_tool_call"]
+            defined_tools = train_set[i]["def_tools"]
             tool_call_complexity.append(train_set[i]["num_input_tools"])
             total_prompt_tokens.append(len(prompt_tokens))
             group_rewards, group_binary_reward = [], []
@@ -692,6 +779,10 @@ def grpo_train_loop(
                     max_tokens=max_ans_len,
                     sampler=lambda x: mx.random.categorical(x / 0.9, axis=-1),  # 1.05
                 )
+
+                # TODO: Move lead tokens from prompt_okens to response
+                # assistant_gen_pos = prompt_tokens.find("assistant\n")
+                # lead = prompt = 
 
                 response_hist.append(response)
                 response_tokens = tokenizer.encode(response, add_special_tokens=False)
@@ -707,6 +798,7 @@ def grpo_train_loop(
                 reward = scorer(
                     llm_gen=response,
                     tools_ground=ground_tool_call,
+                    def_tools=defined_tools,
                     verbose=False,
                 )
                 binary_reward = binary_scorer(
@@ -734,6 +826,10 @@ def grpo_train_loop(
             if not group_rewards:
                 print("No valid rewards found in this batch. Skipping...")
                 continue
+            
+            # if min(group_rewards) == max(group_rewards) and max(group_rewards) < 0:
+            #     print(f"Group max: {min(group_rewards)} and group min {min(group_rewards) }. Skipping...")
+            #     continue
 
             # print(group_rewards)
             all_rewards.append(np.mean(group_rewards).item())
@@ -743,6 +839,11 @@ def grpo_train_loop(
             max_rewards.append(max(group_rewards))
             tot_max_score += max(group_rewards)
             rollout_rewards.append(mx.array(group_rewards))
+
+
+        if not rollout_rewards:
+            print("Skipping batch")
+            continue
 
         # Compute Advantages
         advantages = []
@@ -789,7 +890,7 @@ def grpo_train_loop(
         if TrainConfig.TQDM:
             rwds = list(map(lambda x: round(x, 2), all_rewards[-group_size:]))
             pbar.set_description(
-                f"Loss: {losses[-1]:.4f} | {tot_loss / (it + 1):.4f} Score: {tot_avg_score / ((it + 1) * group_size):.2f} | Max {tot_max_score / (it + 1):.2f} | Bin {tot_binary_reward / (it + 1):.2f} Rewards: {rwds}"
+                f"Loss: {losses[-1]:.4f} | {tot_loss / (it + 1):.4f} | LR: {optimizer.learning_rate.item():1.6f} | Score: {tot_avg_score / ((it + 1) * group_size):.2f} | Max {tot_max_score / (it + 1):.2f} | Bin {tot_binary_reward / (it + 1):.2f} Rewards: {rwds}"
             )
         del grads, clipped_grads, total_norm, loss, policy_reward, kl_div
 
