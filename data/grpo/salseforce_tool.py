@@ -58,7 +58,7 @@ def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, think=True):
             {
                 "role": "system",
                 "content": TOOL_TEMPLATE.format(tools=tool_shuffle(tools))
-                + random.choice(THINK_STRINGS) if think else "",
+                + (random.choice(THINK_STRINGS) if think else ""),
             },
             {"role": "user", "content": data["query"]},
         ]
@@ -68,19 +68,19 @@ def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, think=True):
         return {
             "prompt": tokenizer.apply_chat_template(
                 seq,
-                add_generation_prompt=True,
+                add_generation_prompt=False if think else True,
                 tokenize=False,
-                continue_final_message=False,
+                continue_final_message=True if think else False,
             ),
             "messages": seq,
             "def_tools": tools,
             "ground_tool_call": tool_calls,
             "num_input_tools": len(tools),
-            "scorer": partial(scorer, tools_ground=tool_calls, def_tools=tools)
+            "scorer": partial(scorer, tools_ground=tool_calls, def_tools=tools, think=think)
         }
 
     train_ds = load_dataset("Salesforce/xlam-function-calling-60k")["train"]
-    train_ds = list(filter(lambda x: 0 < len(x["ground_tool_call"]) <= n_tool_calls and x["num_input_tools"] <= n_tool_inputs, map(mapper, train_ds)))
+    train_ds = list(filter(lambda x: 0 < len(x["ground_tool_call"]) <= n_tool_calls and 1 < x["num_input_tools"] <= n_tool_inputs, map(mapper, train_ds)))
     semhash = SemHash.from_records(train_ds, columns=['prompt'])
     train_ds = semhash.self_deduplicate(threshold=0.995)
     # print("Dedup ratio:", train_ds.duplicate_ratio)
@@ -112,7 +112,15 @@ def validate_format(text):
         and (text.count("</tool_call>") == 1)
 
 
-def tool_scorer(llm_gen, tools_ground, verbose=False):
+def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
+    try:
+        return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
+    except:
+        return -1
+    return -1
+
+
+def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     def uniform(s:str):
         return sorted(list(s.lower()))
 
@@ -124,14 +132,31 @@ def tool_scorer(llm_gen, tools_ground, verbose=False):
     tools_gen = tool_call_extract(llm_gen)
     if verbose:
         print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
-    # Invalid tool calling format
+    tool_names = [t['name'] for t in tools_ground]
+    tools_ground_attribs = {t['name']:t['arguments'] for t in tools_ground}
+    req_ground_attribs = {t['name']:t.get('parameters', {}).get('required', []) for t in def_tools}
+    total_score = 0
+
     if tools_gen is None:
         return -1, None
     for tool in tools_gen:
+        # Invalid tool calling format
         if not isinstance(tool, dict):
             return -1, None
         if 'name' not in tool or 'arguments' not in tool:
             return -1, None
+        if not isinstance(tool['arguments'], dict):
+            return -1, None
+        if tool['name'] not in tool_names:
+            return -1, None
+        # Invalid arguments
+        for param_name, val in tool['arguments'].items():
+            if param_name not in tools_ground_attribs[tool['name']]:
+                return -1, None
+        # TODO: Missing required attribs
+        for param_name in req_ground_attribs[tool['name']]:
+            if param_name not in tool['arguments']:
+                total_score += -0.25
 
     a = str(tools_gen)
     b = str(tools_ground)
@@ -140,7 +165,8 @@ def tool_scorer(llm_gen, tools_ground, verbose=False):
         return 2, tools_gen
 
     s = SequenceMatcher(None, a, b)
-    return s.ratio() + (s.find_longest_match().size / len(b)), tools_gen
+    total_score += s.ratio() + (s.find_longest_match().size / len(b))
+    return max(total_score, -1), tools_gen
 
 
 def thinking_validate(llm_gen):
@@ -206,19 +232,24 @@ def thinking_scorer(llm_gen, tools_gen, def_tools):
     return -1
 
 
-def scorer(llm_gen, tools_ground, def_tools):
+def scorer(llm_gen, tools_ground, def_tools, think=True):
     # Adding think tag (prefilled in dataset)
-    llm_gen = "<think>" + llm_gen
+    if think:
+        llm_gen = "<think>" + llm_gen
 
-    # Validate format
-    valid_format = validate_format(llm_gen)
-    if not valid_format:
-        return -1
+        # Validate format
+        valid_format = validate_format(llm_gen)
+        if not valid_format:
+            return -1
+    
     # Tool score
-    tool_score, tools_gen = tool_scorer(llm_gen, tools_ground)
-    if tool_score < 0:
+    tool_score, tools_gen = tool_scorer(llm_gen, tools_ground, def_tools)
+    if tool_score <= 0:
         return -1
-    # Think score: checking if the executing tool was mentioned
+
+    if not think:
+        return tool_score
+
     # think_score = thinking_scorer(llm_gen, tools_gen, def_tools)
     think_score = int(thinking_validate(llm_gen))
     if think_score <= 0:
