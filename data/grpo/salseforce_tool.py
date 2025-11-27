@@ -45,7 +45,7 @@ k_shot = [
     },
 ]
 
-def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, think=True):
+def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio=0.995, selection_size=None, think=True):
     def mapper(data):
         tools = json.loads(data["tools"])
         tool_calls = json.loads(data["answers"])
@@ -81,8 +81,11 @@ def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, think=True):
 
     train_ds = load_dataset("Salesforce/xlam-function-calling-60k")["train"]
     train_ds = list(filter(lambda x: 0 < len(x["ground_tool_call"]) <= n_tool_calls and 1 < x["num_input_tools"] <= n_tool_inputs, map(mapper, train_ds)))
-    semhash = SemHash.from_records(train_ds, columns=['prompt'])
-    train_ds = semhash.self_deduplicate(threshold=0.995)
+    semhash = SemHash.from_records(train_ds, columns=['prompt'], use_ann=False)
+    if selection_size is not None:
+        train_ds = semhash.self_find_representative(selection_size=selection_size)
+    else:
+        train_ds = semhash.self_deduplicate(threshold=dedupe_ratio)
     # print("Dedup ratio:", train_ds.duplicate_ratio)
     train_ds = train_ds.selected
 
@@ -116,8 +119,7 @@ def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     try:
         return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
     except:
-        return -1
-    return -1
+        return -1, None
 
 
 def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
@@ -132,26 +134,32 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     tools_gen = tool_call_extract(llm_gen)
     if verbose:
         print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
-    tool_names = [t['name'] for t in tools_ground]
-    tools_ground_attribs = {t['name']:t['arguments'] for t in tools_ground}
+    tool_ground_names = [t['name'] for t in tools_ground]
+    tools_ground_args = {t['name']:t['arguments'] for t in tools_ground}
     req_ground_attribs = {t['name']:t.get('parameters', {}).get('required', []) for t in def_tools}
     total_score = 0
 
     if tools_gen is None:
         return -1, None
+    if len(tools_gen) != len(tools_ground):
+        return -1, None
+
     for tool in tools_gen:
         # Invalid tool calling format
         if not isinstance(tool, dict):
             return -1, None
+        # Name args missing
         if 'name' not in tool or 'arguments' not in tool:
             return -1, None
+        # Not a dict
         if not isinstance(tool['arguments'], dict):
             return -1, None
-        if tool['name'] not in tool_names:
+        # Invalid tool call
+        if tool['name'] not in tool_ground_names:
             return -1, None
         # Invalid arguments
         for param_name, val in tool['arguments'].items():
-            if param_name not in tools_ground_attribs[tool['name']]:
+            if param_name not in tools_ground_args[tool['name']]:
                 return -1, None
         # TODO: Missing required attribs
         for param_name in req_ground_attribs[tool['name']]:
@@ -236,9 +244,9 @@ def scorer(llm_gen, tools_ground, def_tools, think=True):
     # Adding think tag (prefilled in dataset)
     if think:
         llm_gen = "<think>" + llm_gen
-
         # Validate format
         valid_format = validate_format(llm_gen)
+        # print("Invalid format:", llm_gen, flush=True)
         if not valid_format:
             return -1
     
@@ -253,6 +261,32 @@ def scorer(llm_gen, tools_ground, def_tools, think=True):
     # think_score = thinking_scorer(llm_gen, tools_gen, def_tools)
     think_score = int(thinking_validate(llm_gen))
     if think_score <= 0:
+        # print("Invalid thinking", flush=True)
         return -1
 
     return tool_score + think_score
+
+
+
+if __name__ == '__main__':
+    import os
+    os.environ['HF_HUB_OFFLINE'] = '1'
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from collections import Counter
+
+    tokenizer = AutoTokenizer.from_pretrained("weights/NanoAgent-135M")
+    def total_tokens(data):
+        return len(
+            tokenizer.encode(
+                data,
+            )  # add_generation_prompt=True)
+        )
+
+    ds = salesfores_toolcall(tokenizer, dedupe_ratio=0.95)
+    # ds = list(filter(lambda x: total_tokens(x['prompt']) <= 1024+128, ds))
+    fc_names = []
+    for d in ds:
+        fc_names.append(d['ground_tool_call'][0]['name'])
+    print("Dataset length:", len(ds))
+    # print(Counter(fc_names))

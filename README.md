@@ -5,6 +5,7 @@ It’s small enough (~135 MB in 8-bit) to run on **edge devices** like personal 
 
 Quick inference resource: [here](notebooks/inference.ipynb)
 
+Huggingface Model: [NanoAgent-135M](https://huggingface.co/quwsarohi/NanoAgent-135M)
 Run in Ollama: `ollama run quwsarohi/NanoAgent`
 
 ## 🌍 Real-World Use Cases

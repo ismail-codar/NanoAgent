@@ -40,10 +40,10 @@ from utils.webtool import tool_call_extract
 @dataclass
 class TrainConfig:
     # Iterations
-    ITERS = 10_200
+    ITERS = 5_000
     GENERATE_DATA = False
     BATCH_SIZE = 1
-    GEN_LEN = 256
+    GEN_LEN = 256# + 128
     SAVE_FREQ = 50
     # Weight checkpoint
     LOAD_PREV = True
@@ -51,15 +51,15 @@ class TrainConfig:
     LEARNING_RATE = 5e-6
     WEIGHT_DECAY = 0.0
     EPSILON_MIN = 0.2
-    EPSILON_HIGH = 0.2 # 0.28
+    EPSILON_HIGH = 0.28
     GROUP_SIZE = 4
     WARMUP_STEPS = 100 #int(ITERS * 0.1)
     DECAY_STEPS = 100
     BETA = 0 #0.04
     UPDATE_WEIGHT = 1
-    MAX_INPUT_LEN = 1024
+    MAX_INPUT_LEN = 1024 #+ 784
     SAVE_PATH = "weights/NanoAgent-135M-grpo"
-    DATA_PATH = "data/datasets/grpo_nothink_unordered_cache.pickle"
+    DATA_PATH = "data/datasets/grpo_unordered_cache.pickle"
     TQDM = True
 
 
@@ -75,8 +75,6 @@ print(json.dumps(config_dict, indent=2))
 
 # The model that will be trained
 MODEL_PATH = "weights/NanoAgent-135M"
-# MODEL_PATH = "weights/NanoAgent-135M-think-v2"
-# MODEL_PATH = "weights/SmolLM2-135M-mlx-grpo"
 
 model, _, model_config = load(MODEL_PATH, return_config=True)
 model.train()
@@ -194,7 +192,7 @@ def tool_tokens(ground_tool_call):
 
 
 if TrainConfig.GENERATE_DATA:
-    train_ds = tool_calling_traces(tokenizer) + salesfores_toolcall(tokenizer=tokenizer, n_tool_calls=1, n_tool_inputs=6, think=False)[:5_000]
+    train_ds = tool_calling_traces(tokenizer)[:1200] + salesfores_toolcall(tokenizer=tokenizer, n_tool_calls=2, n_tool_inputs=6, dedupe_ratio=0.95, think=False)
     random.shuffle(train_ds)
     train_ds = list(filter(lambda x: total_tokens(x['prompt']) <= TrainConfig.MAX_INPUT_LEN, train_ds))
     # train_ds.sort(
@@ -214,7 +212,7 @@ else:
 
 # sys.exit()
 
-def mean_map(data, win=100):
+def mean_map(data, win=25):
     def _mean(x):
         while len(x) < win: x.append(0)
         return sum(x) / len(x)
@@ -293,11 +291,12 @@ def load_state(path=TrainConfig.SAVE_PATH):
     with open(os.path.join(path, "train_info.json"), "r") as f:
         train_info = json.load(f)
 
-    # model_old_path = os.path.join(path, "old_model")
-    # if os.path.exists(model_old_path):
-    #     model_old = load(Path(path), model_config=model_config)[0]
-    # else:
-    model_old = None
+    if 0 < TrainConfig.UPDATE_WEIGHT < 1:
+        model_old_path = os.path.join(path, "old_model")
+        if os.path.exists(model_old_path):
+            model_old = load(Path(path), model_config=model_config)[0]
+        else:
+            model_old = None
 
     mx.eval(model.state, optimizer.state)
     print("Model loaded", flush=True)
@@ -370,8 +369,9 @@ def save_state(
         os.path.join(path, "optimizer.safetensors"), dict(tree_flatten(optimizer.state))
     )
 
-    # model_old_path = os.path.join(path, "old_model")
-    # save_model(save_path=model_old_path, model=model)
+    if 0 < TrainConfig.UPDATE_WEIGHT < 1:
+        model_old_path = os.path.join(path, "old_model")
+        save_model(save_path=model_old_path, model=model)
 
     train_info = {
         "training_params": {
@@ -451,7 +451,7 @@ def grpo_loss_fn(
     ratio = mx.exp(log_probs - old_log_probs)
     clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
     advantages = mx.expand_dims(advantages, 1)
-    policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages)
+    policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages) * pad_mask
     # group_policy_reward = mx.sum(policy_reward, axis=-1) / mx.sum(pad_mask, axis=-1)
 
     if beta > 0:
@@ -597,32 +597,19 @@ def grpo_train_loop(
                     sampler=lambda x: mx.random.categorical(x, axis=-1),
                 )
 
-                # TODO: Move lead tokens from prompt_okens to response
+                # TODO: Move lead tokens from prompt_tokens to response
                 response_hist.append(response)
                 response_tokens = tokenizer.encode(response, add_special_tokens=False)
 
                 # Avoiding truncated answers
-                if len(response_tokens) >= max_ans_len - 1:
-                    # print("-+"*10)
-                    # print(print(response))
-                    print("Truncated answer generated. Skipping...", flush=True)
-                    continue
+                # if len(response_tokens) >= max_ans_len - 1:
+                    # print("Truncated answer generated. Skipping...", flush=True)
+                    # continue
 
                 # Embedding EOS token as model.generate removes it
                 response_tokens.append(tokenizer.eos_token_id)
                 reward = scorer(llm_gen=response)
 
-                # Getting unique rewards
-                # According to DAPO: we should get unique rewards that fall between [-1, 2]
-                if reward in group_rewards:
-                    continue
-
-                group_rewards.append(reward)
-                # Store data for the optimization step
-                full_sequence = mx.array(prompt_tokens + response_tokens)
-                rollout_tokens.append(full_sequence)
-                rollout_a_toks.append(mx.array(response_tokens))
-                 
                 if it % 5 == 0:
                     print("ITERATION:", it, '| GROUP:', gitr)
                     print(tokenizer.decode(prompt_tokens))
@@ -633,6 +620,17 @@ def grpo_train_loop(
                     print(f"<tool_call>{json.dumps(ground_tool_call)}</tool_call>")
                     print("REWARD:", reward)
                     print('-'*30, flush=True)
+
+                # Getting unique rewards
+                # According to DAPO: we should get unique rewards that fall between (-1, 2]
+                if reward in group_rewards: # or reward == -1:
+                    continue
+
+                group_rewards.append(reward)
+                # Store data for the optimization step
+                full_sequence = mx.array(prompt_tokens + response_tokens)
+                rollout_tokens.append(full_sequence)
+                rollout_a_toks.append(mx.array(response_tokens))
                 
                 if len(group_rewards) == group_size:
                     break
@@ -642,10 +640,10 @@ def grpo_train_loop(
                 #     break
 
             if not group_rewards:
-                print("No valid rewards found in this batch. Skipping...")
+                # print("No valid rewards found in this batch. Skipping...")
                 continue
             if min(group_rewards) == max(group_rewards):
-                print("No diversity in group rewards. Skipping...")
+                # print("No diversity in group rewards. Skipping...")
                 continue
             
             # if min(group_rewards) == max(group_rewards) and max(group_rewards) < 0:
@@ -661,7 +659,7 @@ def grpo_train_loop(
 
 
         if not rollout_rewards:
-            print("Empty rollout rewards. Skipping...", flush=True)
+            # print("Empty rollout rewards. Skipping...", flush=True)
             continue
 
         # Compute Advantages
