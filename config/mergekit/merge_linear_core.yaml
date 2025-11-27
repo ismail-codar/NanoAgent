@@ -1,0 +1,14 @@
+# Model: weights/NanoAgent-135M
+models:
+  - model: weights/NanoAgent-135M-core
+    parameters:
+      weight: 0.7
+  - model: HuggingFaceTB/SmolLM2-135M-Instruct
+    parameters:
+      weight: 0.15
+  - model: weights/NanoAgent-135M-toolcall
+    parameters:
+      weight: 0.15
+
+merge_method: linear
+dtype: bfloat16

@@ -29,14 +29,14 @@ class TrainConfig:
     VERSION = "instruct"
     TRAIN_TYPE = "sft"
     # Iterations
-    EPOCHS = 3.1
+    EPOCHS = 2.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
     # Weight checkpoint
-    LOAD_PREV = True
+    LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 74959) #500
+    WARMUP_STEPS = int(0.1 * 6656) #500
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -47,7 +47,7 @@ class TrainConfig:
     WEIGHT_DECAY = 0.1
 
     TRAIN_LABEL = ("c" if VERSION == "instruct" else "") + TRAIN_TYPE
-    SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v12"
+    SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v0-think"
 
 
 config_dict = {
@@ -62,8 +62,8 @@ assert TrainConfig.TRAIN_TYPE in ["sft", "dft"]
 # hf_path = f"HuggingFaceTB/SmolLM2-{TrainConfig.SIZE}-Instruct"
 # convert(hf_path=hf_path, mlx_path=f'weights/SmolLM2-{TrainConfig.SIZE}-mlx-instruct')
 
-# model_base = load(f"weights/SmolLM2-{SIZE}-mlx-{VERSION}")[0].freeze().eval()
-model_path = f"weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}"
+# model_path = f"weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}"
+model_path = "weights/NanoAgent-135M"
 model, tokenizer = load(model_path)
 print(f"Model path: weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}")
 # model.generation_config.pad_token_id = tokenizer.pad_token_id
@@ -258,12 +258,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files="data/datasets/SmolLM2_base_train_v12.jsonl",
+    data_files="data/datasets/SmolLM2_base_train_think_v0.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files="data/datasets/SmolLM2_base_test_v12.jsonl",
+    data_files="data/datasets/SmolLM2_base_test_think_v0.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
