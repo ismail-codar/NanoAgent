@@ -14,6 +14,9 @@ from semhash import SemHash
 import ollama
 import numpy as np
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 # K-shot Prompt
 ws_tool = (
     {
@@ -138,6 +141,7 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     tools_ground_args = {t['name']:t['arguments'] for t in tools_ground}
     req_ground_attribs = {t['name']:t.get('parameters', {}).get('required', []) for t in def_tools}
     total_score = 0
+    args_score = []
 
     if tools_gen is None:
         return -1, None
@@ -158,9 +162,17 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
         if tool['name'] not in tool_ground_names:
             return -1, None
         # Invalid arguments
-        for param_name, val in tool['arguments'].items():
+        for param_name, gen_val in tool['arguments'].items():
             if param_name not in tools_ground_args[tool['name']]:
                 return -1, None
+            ground_val = tools_ground_args[tool['name']][param_name]
+            if param_name == 'visit_webpage':
+                args_score.append(int(str(gen_val) == str(ground_val)))
+            else:
+                sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
+                sim_score = sim_score if sim_score >= 0.9 else 0
+                args_score.append(sim_score if type(gen_val) is type(ground_val) else 0)
+            
         # TODO: Missing required attribs
         for param_name in req_ground_attribs[tool['name']]:
             if param_name not in tool['arguments']:
@@ -173,7 +185,8 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
         return 2, tools_gen
 
     s = SequenceMatcher(None, a, b)
-    total_score += s.ratio() + (s.find_longest_match().size / len(b))
+    # total_score += cosine_similarity_tfidf(a, b) + (s.find_longest_match().size / len(b))
+    total_score += (s.find_longest_match().size / len(b)) + (sum(args_score) / len(args_score))
     return max(total_score, -1), tools_gen
 
 
@@ -223,6 +236,12 @@ Example:
     )
 
     return resp.message.content.strip().lower() == 'true'
+
+
+def cosine_similarity_tfidf(sentence1, sentence2):
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform([sentence1, sentence2])
+    return (cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]).item()
 
 
 def thinking_scorer(llm_gen, tools_gen, def_tools):

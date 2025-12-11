@@ -186,6 +186,7 @@ def tool_calling_traces(tokenizer):
                     "def_tools": tools,
                     "ground_tool_call": tool_calls,
                     "num_input_tools": len(tools),
+                    "category": tool_calls[0]['name'],
                     "scorer": partial(scorer, tools_ground=tool_calls, def_tools=tools)
                 })
 
@@ -241,7 +242,7 @@ if __name__ == '__main__':
         )
 
     ds = tool_calling_traces(tokenizer)
-    ds = list(filter(lambda x: total_tokens(x['prompt']) <= 1024+128, ds))
+    ds = list(filter(lambda x: 512 <= total_tokens(x['prompt']) <= 1024+784, ds))
     from collections import Counter
     fc_names = []
     for d in ds:
