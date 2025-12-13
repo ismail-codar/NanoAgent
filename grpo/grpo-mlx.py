@@ -46,24 +46,24 @@ from utils.webtool import tool_call_extract
 @dataclass
 class TrainConfig:
     # Iterations
-    ITERS = 5_000
+    ITERS = 3_000
     GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 128
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 5e-6
+    LEARNING_RATE = 5e-6 # 2e-6
     WEIGHT_DECAY = 0.01
     EPSILON_MIN = 0.4
     EPSILON_HIGH = 0.4
     GROUP_SIZE = 4
     WARMUP_STEPS = 100
     DECAY_STEPS = 100
-    BETA = 0
-    UPDATE_WEIGHT = 8
+    BETA = 0 # 0.04
+    UPDATE_WEIGHT = 16 # 16 or 8
     EVAL_STEPS = 50
     NUM_ITER = 1 # 1
-    GRAD_NORM = 0.1
+    GRAD_NORM = 0.1 # 0.1 if LEARNING_RATE = 5e-6 0 if LEARNING_RATE = 2e-6
     REF_MODEL_MIXUP_ALPHA = 0.6
     MAX_INPUT_LEN = 1024 + 784
     SAVE_PATH = "weights/NanoAgent-135M-grpo-web"
@@ -71,7 +71,7 @@ class TrainConfig:
     TQDM = True
     SAMPLING = "sequence"
     SOFT_CLIP = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE = 0.9
+    TEMPERATURE = 0.8 # <= 0.9
 
 
 # Token Sampling: DAPO - https://arxiv.org/pdf/2503.14476
@@ -151,18 +151,18 @@ def linear_decay_with_warmup(
     return schedule
 
 
-scheduler = cosine_decay_with_warmup(
-    max_lr=TrainConfig.LEARNING_RATE,
-    total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
-    warmup_steps=TrainConfig.WARMUP_STEPS,
-)
-
-# scheduler = linear_decay_with_warmup(
-#     base_lr=TrainConfig.LEARNING_RATE,
+# scheduler = cosine_decay_with_warmup(
+#     max_lr=TrainConfig.LEARNING_RATE,
 #     total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
 #     warmup_steps=TrainConfig.WARMUP_STEPS,
-#     decay_steps=TrainConfig.DECAY_STEPS
 # )
+
+scheduler = linear_decay_with_warmup(
+    base_lr=TrainConfig.LEARNING_RATE,
+    total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
+    warmup_steps=TrainConfig.WARMUP_STEPS,
+    decay_steps=TrainConfig.DECAY_STEPS
+)
 
 optimizer = optim.AdamW(
     learning_rate=scheduler, betas=[0.9, 0.99], weight_decay=TrainConfig.WEIGHT_DECAY
@@ -229,9 +229,9 @@ else:
 
 # sys.exit()
 
-def evaluate(eval_model, runs=2):
+def evaluate(eval_model, runs=1):
     # return [0]
-    eval_data = train_ds[-25:]
+    eval_data = train_ds[-50:]
     rewards = []
     eval_model.eval()
     for idx, data in enumerate(eval_data):
@@ -243,7 +243,7 @@ def evaluate(eval_model, runs=2):
                 tokenizer,
                 prompt_tokens,
                 max_tokens=TrainConfig.GEN_LEN,
-                sampler=lambda x: mx.random.categorical(x / 0.1, axis=-1)
+                # sampler=lambda x: mx.random.categorical(x / 0.1, axis=-1)
             )
             rewards.append(scorer(llm_gen=response))
     return rewards
@@ -615,25 +615,29 @@ def grpo_train_loop(
     tot_loss = sum(losses)
 
     # Start training
-    if TrainConfig.TQDM:
-        pbar = tqdm.tqdm(
-            range(prev_iters, max_iters, batch_size),
-            total=max_iters // batch_size,
-            initial=prev_iters,
+    # if TrainConfig.TQDM:
+    pbar = tqdm.tqdm(
+        # range(prev_iters, max_iters, batch_size),
+        total=max_iters // batch_size,
+        initial=prev_iters,
         )
-    else:
-        pbar = range(prev_iters, max_iters, batch_size)
+    # else:
+        # pbar = range(prev_iters, max_iters, batch_size)
 
     # Epoch loop
-    for it in pbar:
+    # for it in pbar:
+    skipped = False
+    while len(losses) < TrainConfig.ITERS:
         # Evaluation
-        if it % TrainConfig.EVAL_STEPS == 0:
+        if len(losses) % TrainConfig.EVAL_STEPS == 0 and not skipped:
             eval_scores = evaluate(model)
-            eval_rewards.append([it, sum(eval_scores)/len(eval_scores)])
+            eval_rewards.append([len(losses), sum(eval_scores)/len(eval_scores)])
         model.train()
+        skipped = True
 
         # 1. Sample a batch of prompts
-        batch_indices = [bi % len(train_set) for bi in range(it, it + batch_size)]
+        # batch_indices = [bi % len(train_set) for bi in range(it, it + batch_size)]
+        batch_indices = random.choices(range(len(train_set)), k=batch_size)
 
         # 2. Rollout: Generate G responses for each prompt using the old model
         rollout_tokens = []
@@ -674,24 +678,30 @@ def grpo_train_loop(
             rollouts = sorted(rollouts, key=lambda x: x[0], reverse=True)
             # DAPO: Pick rewards where we see a good reward distribution shift
             valid_rollout_indices = []
-            unq_rewards = set()
+            unq_rolls = set()
+            valid_rollout_rewards = []
             for ridx, (re, fs, rt) in enumerate(rollouts):
-                if re not in unq_rewards:
+                rt = tuple(rt.tolist())
+                # If rollout rewards are not diverse and we only have one to take, wait for diverse value
+                if (
+                    (len(valid_rollout_indices) == TrainConfig.GROUP_SIZE - 1) and \
+                    min(valid_rollout_rewards) == max(valid_rollout_rewards) and \
+                    re in valid_rollout_rewards
+                ):
+                    continue
+                elif rt not in unq_rolls:
                     valid_rollout_indices.append(ridx)
-                    unq_rewards.add(re)
+                    unq_rolls.add(rt)
+                    valid_rollout_rewards.append(re)
                 if len(valid_rollout_indices) == TrainConfig.GROUP_SIZE:
                     break
 
-            # Remove -1 rewards if possible
-            if len(valid_rollout_indices) > 2 and -1 in unq_rewards:
-                valid_rollout_indices.pop()
-
-            if len(valid_rollout_indices) <= 1:
-                print(f"\nNo diversity in group rewards: {[x[0] for x in rollouts]}. Skipping...")
+            if len(valid_rollout_indices) <= 1 or (min(valid_rollout_rewards) == max(valid_rollout_rewards)):
+                print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
                 continue
 
             rollouts = [rollouts[p] for p in valid_rollout_indices]
-            print("\nRollouts:", [x[0] for x in rollouts])
+            print("\nRollouts:", [round(x[0], 2) for x in rollouts])
             # Store data for the optimization step
             group_rewards.extend([x[0] for x in rollouts])
             rollout_tokens.extend([x[1] for x in rollouts])
@@ -735,6 +745,8 @@ def grpo_train_loop(
             optimizer.update(model, clipped_grads)
             mx.eval(model.parameters(), optimizer.state)
             _loss += - (loss.item() / TrainConfig.NUM_ITER)
+            pbar.update(TrainConfig.BATCH_SIZE)
+            skipped = False
 
         losses.append(_loss)
         learning_rates.append(optimizer.learning_rate.item())
@@ -743,17 +755,17 @@ def grpo_train_loop(
         if TrainConfig.TQDM:
             rwds = list(map(lambda x: round(x, 2), all_rewards[-3:]))
             pbar.set_description(
-                f"Loss: {losses[-1]:.4f} | {tot_loss / (it + 1):.4f} | LR: {optimizer.learning_rate.item():1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][-1]:.2f} | Rewards: {rwds}"
+                f"Loss: {losses[-1]:.4f} | {tot_loss / (len(losses) + 1):.4f} | LR: {optimizer.learning_rate.item():1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][-1]:.2f} | Rewards: {rwds}"
             )
         del grads, clipped_grads, total_norm, loss
 
         # Sync old model weights
-        if TrainConfig.UPDATE_WEIGHT >= 1 and it % TrainConfig.UPDATE_WEIGHT == 0:
+        if TrainConfig.UPDATE_WEIGHT >= 1 and len(losses) % TrainConfig.UPDATE_WEIGHT == 0:
             model_old.update(model.parameters())
             # nn.quantize(model_old, bits=8)
             mx.eval(model_old)
             model_old.eval().freeze()
-            print(f"\nIter {it+1}: Synced old model weights.")
+            print(f"\nIter {len(losses)+1}: Synced old model weights.")
         elif TrainConfig.UPDATE_WEIGHT < 1:
             model_old.update(interpolate_models(model_old, model, TrainConfig.UPDATE_WEIGHT))
             mx.eval(model_old)
@@ -768,9 +780,9 @@ def grpo_train_loop(
             # print(f"\nIter {it+1}: Synced ref model weights.")
 
 
-        if it % TrainConfig.SAVE_FREQ == 0:
+        if len(losses) % TrainConfig.SAVE_FREQ == 0:
             save_state(
-                it,
+                len(losses),
                 losses,
                 learning_rates,
                 all_rewards,
@@ -782,9 +794,9 @@ def grpo_train_loop(
                 path=TrainConfig.SAVE_PATH,
             )
 
-        if it % 10 == 0:
+        if len(losses) % 5 == 0:
             prog_graph(
-                it,
+                len(losses),
                 losses,
                 learning_rates,
                 all_rewards,

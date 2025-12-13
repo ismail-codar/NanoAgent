@@ -121,7 +121,8 @@ def validate_format(text):
 def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     try:
         return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
-    except:
+    except Exception as E:
+        print("Exception:", E)
         return -1, None
 
 
@@ -166,12 +167,10 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
             if param_name not in tools_ground_args[tool['name']]:
                 return -1, None
             ground_val = tools_ground_args[tool['name']][param_name]
-            if param_name == 'visit_webpage':
-                args_score.append(int(str(gen_val) == str(ground_val)))
-            else:
-                sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
-                sim_score = sim_score if sim_score >= 0.9 else 0
-                args_score.append(sim_score if type(gen_val) is type(ground_val) else 0)
+
+            sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
+            # sim_score = sim_score if sim_score >= 0.9 else 0
+            args_score.append(sim_score if type(gen_val) is type(ground_val) else 0)
             
         # TODO: Missing required attribs
         for param_name in req_ground_attribs[tool['name']]:
