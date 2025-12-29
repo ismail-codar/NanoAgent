@@ -1,4 +1,5 @@
 FROM python:3.10-bullseye
+# python:3.11-alpine
 
 # Install build dependencies
 RUN apt-get update && \

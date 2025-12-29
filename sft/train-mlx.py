@@ -34,7 +34,7 @@ class TrainConfig:
     EPOCHS = 2.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
-    LOAD_PREV = False
+    LOAD_PREV = True
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
     WARMUP_STEPS = int(0.1 * 75000)
@@ -47,7 +47,7 @@ class TrainConfig:
     MAX_LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 0.1
     QUANTIZATION = 8
-    GRADIENT_CHECKPOINT_LAYERS = None
+    GRADIENT_CHECKPOINT_LAYERS = 1
     TRAIN_LABEL = ("c" if VERSION == "instruct" else "") + TRAIN_TYPE
     SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v12"
 

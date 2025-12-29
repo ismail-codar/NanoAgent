@@ -3,6 +3,7 @@ import os
 from typing import Optional
 
 
+
 class DockerSandbox:
     def __init__(self):
         self.client = docker.from_env()
@@ -11,7 +12,7 @@ class DockerSandbox:
     def create_container(self):
         try:
             image, build_logs = self.client.images.build(
-                path=".",
+                path=os.path.dirname(os.path.abspath(__file__)),
                 tag="agent-sandbox",
                 rm=True,
                 forcerm=True,
@@ -71,13 +72,13 @@ class DockerSandbox:
 # Reference: https://huggingface.co/docs/smolagents/tutorials/secure_code_execution#sandbox-approaches-for-secure-code-execution
 if __name__ == '__main__':
     # Example usage:
+
+    print(os.path.dirname(os.path.abspath(__file__)))
     sandbox = DockerSandbox()
 
     try:
         # Define your agent code
-        agent_code = """
-    print('Hello world')
-    """
+        agent_code = """print('Hello world')"""
         for i in range(10):
             # Run the code in the sandbox
             output = sandbox.run_code(agent_code)

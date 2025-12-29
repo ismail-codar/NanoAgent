@@ -78,7 +78,7 @@ class TrainConfig:
     TQDM = True
     SAMPLING = "token"
     SOFT_CLIP = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE = 0.8 # <= 0.9 when MIN_P not used
+    TEMPERATURE = 0.7 # <= 0.9 when MIN_P not used
     MIN_P = None
     TOP_K = None
     TOP_P = 0.90
@@ -765,6 +765,11 @@ def grpo_train_loop(
                 print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
                 # for re, fs, rt in rollouts:
                     # print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
+                if not valid_rollout_rewards:
+                    continue
+                all_rewards.append(np.mean(valid_rollout_rewards).item())
+                max_rewards.append(max(valid_rollout_rewards))
+                std_rewards.append(np.std(valid_rollout_rewards).item())
                 continue
 
             rollouts = [rollouts[p] for p in valid_rollout_indices]
