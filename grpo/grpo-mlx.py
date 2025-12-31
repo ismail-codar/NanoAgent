@@ -32,6 +32,7 @@ from mlx_lm import generate, load, convert
 from mlx_lm.utils import load_model, save_model, dequantize_model
 from data.grpo.salseforce_tool import salesfores_toolcall
 from data.grpo.websearch_tool import tool_calling_traces
+from data.grpo.autoif import autoif_ds
 from data.grpo.calculate import calculate_math
 from data.grpo.gorilla_tool import gorilla_openfun
 from scipy.ndimage import gaussian_filter1d
@@ -50,35 +51,36 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 3_000
-    GENERATE_DATA = False
+    GENERATE_DATA = True
     BATCH_SIZE = 1
-    GEN_LEN = 64
+    GEN_LEN = 512 #64
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 2e-6
     WEIGHT_DECAY = 0
-    EPSILON_MIN = 0.3
-    EPSILON_HIGH = 0.3
-    GROUP_SIZE = 4
-    WARMUP_STEPS = 100
-    DECAY_STEPS = 100
-    BETA = 0 # 0.01
+    EPSILON_MIN = 0.2
+    EPSILON_HIGH = 0.272
+    GROUP_SIZE = 3 # 4
+    WARMUP_STEPS = 10 # 50
+    DECAY_STEPS = 20 # 10
+    BETA = 0 # 0.04
     UPDATE_WEIGHT = 1
     EVAL_STEPS = 50
     NUM_ITER = 1
     GRAD_ACCUM = 1
     GRAD_NORM = 1
     REF_MODEL_MIXUP_ALPHA = 1 # 0.6
-    MAX_INPUT_LEN = 1536
-    SAVE_PATH = "weights/NanoAgent-135M-grpo-web"
-    DATA_PATH = "data/datasets/grpo_unordered_cache.pickle"
-    MODEL = "quwsarohi/NanoAgent-135M"
+    MAX_INPUT_LEN = 768 # 1536
+    SAVE_PATH = "weights/NanoAgent-135M-grpo"
+    DATA_PATH = "data/datasets/grpo_mix.pickle"
+    MODEL = "quwsarohi/NanoAgent-135M" #"weights/SmolLM2-360M-mlx-instruct"
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
     TQDM = True
+    STD_NORM = False
     SAMPLING = "token"
-    SOFT_CLIP = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE = 0.7 # <= 0.9 when MIN_P not used
+    SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
+    TEMPERATURE = 1
     MIN_P = None
     TOP_K = None
     TOP_P = 0.90
@@ -120,7 +122,6 @@ model, _, model_config = load(cache_mlx_path, return_config=True)
 if TrainConfig.QUANTIZATION is not None:
     nn.quantize(model, group_size=64, bits=TrainConfig.QUANTIZATION)
     print(f"Model quantized to {TrainConfig.QUANTIZATION} bits")
-model.train()
 
 
 if TrainConfig.UPDATE_WEIGHT == 1:
@@ -233,22 +234,8 @@ def tool_tokens(ground_tool_call):
 
 
 if TrainConfig.GENERATE_DATA:
-    ds = tool_calling_traces(tokenizer)#+ salesfores_toolcall(tokenizer=tokenizer, n_tool_calls=2, n_tool_inputs=6, dedupe_ratio=0.95, think=False) #+ gorilla_openfun(tokenizer=tokenizer)
-    # train_ds = salesfores_toolcall(tokenizer=tokenizer, n_tool_calls=1, n_tool_inputs=6, dedupe_ratio=0.95, think=False)
-    ds = list(filter(lambda x: total_tokens(x['prompt']) <= TrainConfig.MAX_INPUT_LEN, ds))
-    random.shuffle(ds)
-    # train_ds.sort(
-    #     key=lambda x: (len(json.dumps(x["ground_tool_call"])), x["num_input_tools"])
-    # )
-    # train_ds = train_ds[:TrainConfig.ITERS]
-    train_ds = []
-    cnt = defaultdict(int)
-    for d in ds:
-        fname = d['ground_tool_call'][0]['name']
-        if cnt[fname] < 1700:
-            cnt[fname] += 1
-            train_ds.append(d)
-
+    train_ds = autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN) + salesfores_toolcall(tokenizer, TrainConfig.MAX_INPUT_LEN) + tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)
+    # train_ds = list(filter(lambda x: total_tokens(x['prompt']) <= TrainConfig.MAX_INPUT_LEN, train_ds))
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
     with open(TrainConfig.DATA_PATH, 'wb') as fp:
@@ -281,7 +268,7 @@ def evaluate(eval_model, samples, runs=4, temp=0.):
                 sampler=None if temp == 0 else lambda x: mx.random.categorical(x / temp, axis=-1)
             )
             response = response.lstrip('<tool_call>')
-            rewards.append(scorer(llm_gen=response))
+            rewards.append(scorer(response))
     return rewards
 
 
@@ -302,6 +289,7 @@ def prog_graph(
     learning_rates,
     all_rewards,
     eval_rewards,
+    std_rewards,
     save_path=None,
     plot=True,
 ):
@@ -318,6 +306,27 @@ def prog_graph(
     axes[0].grid(True)
 
     # Rewards
+    std_rewards = np.asarray(std_rewards)
+    zero_mask = std_rewards <= 1e-6
+    def contiguous_regions(mask):
+        """Return list of (start, end) index pairs where mask is True."""
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
+            return []
+
+        splits = np.where(np.diff(idx) != 1)[0] + 1
+        groups = np.split(idx, splits)
+        return [(g[0], g[-1] + 1) for g in groups]  # end is exclusive
+    
+    for start, end in contiguous_regions(zero_mask):
+        axes[1].axvspan(
+            start,
+            end,
+            color="red",
+            alpha=0.15,   # transparency
+            zorder=0      # keep it behind the lines
+        )
+
     axes[1].plot(np.cumsum(all_rewards) / (np.arange(len(all_rewards)) + 1), color="tab:blue", alpha=0.6, linestyle='--')
     # axes[1].plot(mean_map(all_rewards), color="tab:blue", alpha=0.6, linestyle='--')
     axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue")
@@ -491,7 +500,7 @@ def interpolate_models(past_model: nn.Module, present_model: nn.Module, weight: 
     return tree_unflatten(new_weights)
 
 
-def soft_gate(x, advantages, t_pos=1, t_neg=1.1):
+def soft_gate(x, advantages, t_pos=1, t_neg=1.05):
     # SAPO default: t_pos=1, t_neg=1.05
     temp = mx.where(advantages > 0, t_pos, t_neg)
     return mx.sigmoid(temp * (x-1)) * (4 / temp)
@@ -534,6 +543,11 @@ def grpo_loss_fn(
     model, model_old, model_ref, io_toks, a_toks, advantages, beta, pad_tok_id
 ):
     model.train()
+    # if model_old is not None:
+    #     model_old.eval()
+    # if model_ref is not None:
+    #     model_ref.eval()
+    
     """The GRPO loss function."""
     # Get log probs from the trainable model (π_θ)
     log_probs, pad_mask = calculate_log_probs(model, io_toks, a_toks, pad_tok_id)
@@ -606,7 +620,7 @@ def grpo_loss_fn(
 
     # The objective is to maximize this, so we return the negative for minimization
     if TrainConfig.SAMPLING == 'token':
-        loss = -1 * ((token_policy_reward.sum(axis=-1) / total_tokens).sum(axis=-1) / n_groups)
+        loss = -1 * ((token_policy_reward.sum(axis=-1) / total_tokens).sum(axis=-1)).sum()
     else:
         loss = -1 * (token_policy_reward.sum() / n_groups)
     return loss
@@ -654,7 +668,6 @@ def grpo_train_loop(
     eval_rewards=[]
 ):
     
-    model.train()
     accum_grads = None
     if model_old is not None:
         model_old.update(model.parameters())
@@ -695,7 +708,6 @@ def grpo_train_loop(
                 }
             ])
         
-        model.train()
         skipped = True
 
         # 1. Sample a batch of prompts
@@ -714,7 +726,6 @@ def grpo_train_loop(
             group_rewards = []
             rollouts = []
             model.eval()
-
             # Generate responses/rollouts
             for gitr in range(group_size * 2):
                 # Generate a response
@@ -733,7 +744,7 @@ def grpo_train_loop(
 
                 # Embedding EOS token as model.generate removes it
                 response_tokens.append(tokenizer.eos_token_id)
-                reward = scorer(llm_gen=response)
+                reward = scorer(response)
                 
                 full_sequence = mx.array(prompt_tokens + response_tokens)
                 rollouts.append((reward, full_sequence, mx.array(response_tokens)))
@@ -763,22 +774,23 @@ def grpo_train_loop(
 
             if len(valid_rollout_indices) <= 1 or (min(valid_rollout_rewards) == max(valid_rollout_rewards)):
                 print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
+                continue
                 # for re, fs, rt in rollouts:
                     # print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
                 if not valid_rollout_rewards:
                     continue
                 all_rewards.append(np.mean(valid_rollout_rewards).item())
                 max_rewards.append(max(valid_rollout_rewards))
-                std_rewards.append(np.std(valid_rollout_rewards).item())
+                std_rewards.append(0)
                 continue
 
             rollouts = [rollouts[p] for p in valid_rollout_indices]
             print("\nRollouts:", [round(x[0], 2) for x in rollouts])
-            # print(train_set[i%len(train_set)]['prompt'])
-            print(train_set[i%len(train_set)]['ground_tool_call'])
+            print(train_set[i%len(train_set)]['prompt'])
+            # print(train_set[i%len(train_set)]['ground_tool_call'])
             for re, fs, rt in rollouts:
                 print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
-            print()
+            # print()
             # Store data for the optimization step
             group_rewards.extend([x[0] for x in rollouts])
             rollout_tokens.extend([x[1] for x in rollouts])
@@ -796,8 +808,10 @@ def grpo_train_loop(
         advantages = []
         for rewards in rollout_rewards:
             mean_reward = mx.mean(rewards)
-            std_reward = mx.sqrt(mx.var(rewards)) + 1e-8  # Add epsilon for stability
-            adv = (rewards - mean_reward) / std_reward
+            std_reward = mx.sqrt(mx.var(rewards))
+            adv = (rewards - mean_reward) #/ std_reward
+            if TrainConfig.STD_NORM:
+                adv = adv / (std_reward + 1e-8)  # Add epsilon for stability
             std_rewards.append(std_reward.item())
             advantages.append(adv)
 
@@ -808,7 +822,6 @@ def grpo_train_loop(
         # Optimization Step
         _loss = 0
         for _ in range(TrainConfig.NUM_ITER):
-            model.train()
             loss, grads = loss_and_grad_fn(
                 model=model,
                 model_old=model_old,
@@ -906,6 +919,7 @@ def grpo_train_loop(
                 learning_rates,
                 all_rewards,
                 eval_rewards,
+                std_rewards,
                 save_path=TrainConfig.SAVE_PATH,
                 plot=False,
             )

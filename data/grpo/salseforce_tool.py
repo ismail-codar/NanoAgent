@@ -48,7 +48,15 @@ k_shot_example = [
     },
 ]
 
-def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio=0.995, selection_size=None, think=True, k_shot=False):
+def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio=0.995, think=False, k_shot=False):
+    
+    apply_chat_template = lambda seq: tokenizer.apply_chat_template(
+                seq,
+                add_generation_prompt=False if think else True,
+                tokenize=False,
+                continue_final_message=True if think else False,
+            )
+    
     def mapper(data):
         tools = json.loads(data["tools"])
         tool_calls = json.loads(data["answers"])
@@ -69,12 +77,7 @@ def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio
             seq.append({"role": "assistant", "content": "<think>"})
         
         return {
-            "prompt": tokenizer.apply_chat_template(
-                ([] if not k_shot else k_shot_example) + seq,
-                add_generation_prompt=False if think else True,
-                tokenize=False,
-                continue_final_message=True if think else False,
-            ),
+            "prompt": apply_chat_template(seq),
             "messages": seq,
             "def_tools": tools,
             "ground_tool_call": tool_calls,
@@ -85,12 +88,18 @@ def salesfores_toolcall(tokenizer, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio
     train_ds = load_dataset("Salesforce/xlam-function-calling-60k")["train"]
     train_ds = list(filter(lambda x: 0 < len(x["ground_tool_call"]) <= n_tool_calls and 1 < x["num_input_tools"] <= n_tool_inputs, map(mapper, train_ds)))
     semhash = SemHash.from_records(train_ds, columns=['prompt'], use_ann=False)
-    if selection_size is not None:
-        train_ds = semhash.self_find_representative(selection_size=selection_size)
-    else:
-        train_ds = semhash.self_deduplicate(threshold=dedupe_ratio)
-    # print("Dedup ratio:", train_ds.duplicate_ratio)
+    train_ds = semhash.self_deduplicate(threshold=dedupe_ratio)
     train_ds = train_ds.selected
+
+    train_ds = list(filter(lambda x: len(tokenizer.encode(x['prompt'])) <= prompt_token_len, train_ds))
+
+    if k_shot:
+        for i in range(len(train_ds)):
+            # Randomly sample one example
+            rand_ds = random.choice(train_ds)
+            train_ds[i]['messages'] = rand_ds[i]['messages'] + train_ds[i]['messages']
+            train_ds[i]['prompt'] = apply_chat_template(train_ds[i]['messages'])
+        train_ds = list(filter(lambda x: len(tokenizer.encode(x['prompt'])) <= prompt_token_len, train_ds))
 
     print("Input tool distribution:", np.bincount([x["num_input_tools"] for x in train_ds]))
     print(

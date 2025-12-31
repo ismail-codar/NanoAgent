@@ -8,12 +8,33 @@ class DockerSandbox:
     def __init__(self):
         self.client = docker.from_env()
         self.container = None
+        self.container_tag = "agent-sandbox"
+    
+    def is_running(self, container_name):
+        # Ref: https://stackoverflow.com/questions/35586900/how-to-check-if-a-docker-instance-is-running#62910105
+        """
+        verify the status of a sniffer container by it's name
+        :param container_name: the name of the container
+        :return: Boolean if the status is ok
+        """
+        try:
+            self.container = self.client.containers.get(container_name)
+        except Exception as E:
+            self.container = None
+            return False
+        container_state = self.container.attrs['State']
+        container_is_running = container_state['Status'] == 'running'
+        if not container_is_running:
+            self.container = None
+        return container_is_running
 
     def create_container(self):
+        if self.is_running(self.container_tag):
+            return
         try:
             image, build_logs = self.client.images.build(
                 path=os.path.dirname(os.path.abspath(__file__)),
-                tag="agent-sandbox",
+                tag=self.container_tag,
                 rm=True,
                 forcerm=True,
                 buildargs={},

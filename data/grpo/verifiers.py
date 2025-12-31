@@ -56,9 +56,9 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     args_score = []
 
     if tools_gen is None:
-        return -2, None
+        return -1, None
     if len(tools_gen) != len(tools_ground):
-        return -2, None
+        return -1, None
 
     # Scoring:
     # -2: Major mistakes -> Wrong format | imaginary tools | invalid tool call signature
@@ -67,20 +67,20 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     for tool in tools_gen:
         # Invalid tool calling format
         if not isinstance(tool, dict):
-            return -2, None
+            return -1, None
         # Name/args missing
         if 'name' not in tool or 'arguments' not in tool:
-            return -2, None
+            return -1, None
         # Not a dict
         if not isinstance(tool['arguments'], dict):
-            return -2, None
+            return -1, None
         # Invalid tool call
         if tool['name'] not in tool_ground_names:
-            return -2, None
+            return -1, None
         # Invalid arguments
         for param_name, gen_val in tool['arguments'].items():
             if param_name not in tools_ground_args[tool['name']]:
-                return -2, None
+                return -1, None
             ground_val = tools_ground_args[tool['name']][param_name]
 
             sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
@@ -98,11 +98,9 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     b = str(tools_ground)
 
     if uniform(a) == uniform(b):
-        return 2, tools_gen
+        return 1, tools_gen
 
-    s = SequenceMatcher(None, a, b)
-    # total_score += cosine_similarity_tfidf(a, b) + (s.find_longest_match().size / len(b))
-    total_score += (s.find_longest_match().size / len(b)) + (sum(args_score) / len(args_score))
+    total_score += sum(args_score) / len(args_score)
     return max(total_score, -1), tools_gen
 
 

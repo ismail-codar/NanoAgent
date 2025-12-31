@@ -7,7 +7,7 @@ from data.utils import tool_shuffle
 from functools import partial
 from .verifiers import validate_format, tool_scorer, thinking_validate
 
-def tool_calling_traces(tokenizer):
+def tool_calling_traces(tokenizer, prompt_token_len):
     visit_webpage = {
         "name": "visit_webpage",
         "description": "Fetches and displays the textual content of a webpage (converted to Markdown) from a given URL.",
@@ -104,6 +104,9 @@ def tool_calling_traces(tokenizer):
         new_dataset.extend(mapper(data))
     # ds = ds.remove_columns(["chat_template_kwargs"])
     # ds = [d for d in ds]
+
+    new_dataset = list(filter(lambda x: len(tokenizer.encode(x['prompt'])) <= prompt_token_len, new_dataset))
+
     return new_dataset
 
 
