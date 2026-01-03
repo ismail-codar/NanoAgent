@@ -51,15 +51,15 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 3_000
-    GENERATE_DATA = True
+    GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 512 #64
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 2e-6
-    WEIGHT_DECAY = 0
-    EPSILON_MIN = 0.2
-    EPSILON_HIGH = 0.272
+    LEARNING_RATE = 1e-5
+    WEIGHT_DECAY = 0.01
+    EPSILON_MIN = 0.2  # Sequence/GSPO: 3e-4 | GRPO: 0.2
+    EPSILON_HIGH = 0.272 # Sequence/GSPO: 4e-4 | GRPO: 0.272
     GROUP_SIZE = 3 # 4
     WARMUP_STEPS = 10 # 50
     DECAY_STEPS = 20 # 10
@@ -78,12 +78,13 @@ class TrainConfig:
     GRADIENT_CHECKPOINT_LAYERS = 6
     TQDM = True
     STD_NORM = False
+    CONST_TOK_SCALE = True
     SAMPLING = "token"
-    SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
+    SOFT_CLIP = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
     TEMPERATURE = 1
-    MIN_P = None
+    MIN_P = 0.15 # None
     TOP_K = None
-    TOP_P = 0.90
+    TOP_P = None # 0.85
 
 
 # Token Sampling: DAPO - https://arxiv.org/pdf/2503.14476
@@ -272,7 +273,7 @@ def evaluate(eval_model, samples, runs=4, temp=0.):
     return rewards
 
 
-def mean_map(data, win=50):
+def mean_map(data, win=20):
     def _mean(x):
         while len(x) < win: x.append(0)
         return sum(x) / len(x)
@@ -327,8 +328,8 @@ def prog_graph(
             zorder=0      # keep it behind the lines
         )
 
-    axes[1].plot(np.cumsum(all_rewards) / (np.arange(len(all_rewards)) + 1), color="tab:blue", alpha=0.6, linestyle='--')
-    # axes[1].plot(mean_map(all_rewards), color="tab:blue", alpha=0.6, linestyle='--')
+    axes[1].plot(np.cumsum(all_rewards) / (np.arange(len(all_rewards)) + 1), color="tab:blue", alpha=0.4, linestyle=':')
+    axes[1].plot(mean_map(all_rewards), color="tab:blue", alpha=0.6, linestyle='--')
     axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue")
     # axes[1].plot(all_rewards, alpha=0.2, color="tab:blue")
     axes[1].set_title("All Reward (blue)")
@@ -560,9 +561,12 @@ def grpo_loss_fn(
     else:
         old_log_probs = mx.stop_gradient(log_probs)
 
-    # total_tokens = pad_mask.sum()
     n_groups = io_toks.shape[0]
-    total_tokens = n_groups * TrainConfig.GEN_LEN
+
+    if TrainConfig.CONST_TOK_SCALE:
+        total_tokens = n_groups * TrainConfig.GEN_LEN
+    else:
+        total_tokens = pad_mask.sum()    
 
     # PPO-clip objective
     # Ratio is converted from log values using exp(log)
@@ -570,19 +574,16 @@ def grpo_loss_fn(
         # GSPO Equation: https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide/gspo-reinforcement-learning?q=learning+rage
         ratio = ((log_probs - old_log_probs) * pad_mask).sum(axis=-1) / TrainConfig.GEN_LEN
         ratio = mx.exp(ratio)
-        # print("Ratio:", ratio)
         if not TrainConfig.SOFT_CLIP:
             clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
             token_policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages)
         else:
             token_policy_reward = soft_gate(ratio, advantages) * advantages
-        # print("Token Reward:", token_policy_reward)
         # token_policy_reward.shape: (G, )
     elif TrainConfig.SAMPLING == 'token':
         # DAPO - Decoupled Clip and Dynamic sAmpling Policy Optimization: https://arxiv.org/pdf/2503.14476
         ratio = mx.exp(log_probs - old_log_probs)
-        advantages = mx.expand_dims(advantages, 1)
-        # print("Ratio:", ratio.mean(axis=-1))
+        advantages = mx.expand_dims(advantages, axis=1)
         # DAPO
         if not TrainConfig.SOFT_CLIP:
             clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
@@ -721,11 +722,12 @@ def grpo_train_loop(
 
         # Batch loop
         for i in batch_indices:
-            prompt_tokens = tokenizer.encode(train_set[i%len(train_set)]['prompt'])#.rstrip('<tool_call>'))
+            prompt_tokens = tokenizer.encode(train_set[i%len(train_set)]['prompt'])
             scorer = train_set[i]['scorer']
             group_rewards = []
             rollouts = []
             model.eval()
+            response_score_cache = dict()
             # Generate responses/rollouts
             for gitr in range(group_size * 2):
                 # Generate a response
@@ -744,7 +746,12 @@ def grpo_train_loop(
 
                 # Embedding EOS token as model.generate removes it
                 response_tokens.append(tokenizer.eos_token_id)
-                reward = scorer(response)
+                # Response scoring cache
+                if response in response_score_cache:
+                    reward = response_score_cache[response]
+                else:
+                    reward = scorer(response)
+                    response_score_cache[response] = reward
                 
                 full_sequence = mx.array(prompt_tokens + response_tokens)
                 rollouts.append((reward, full_sequence, mx.array(response_tokens)))
@@ -775,22 +782,23 @@ def grpo_train_loop(
             if len(valid_rollout_indices) <= 1 or (min(valid_rollout_rewards) == max(valid_rollout_rewards)):
                 print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
                 continue
-                # for re, fs, rt in rollouts:
-                    # print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
-                if not valid_rollout_rewards:
-                    continue
-                all_rewards.append(np.mean(valid_rollout_rewards).item())
-                max_rewards.append(max(valid_rollout_rewards))
-                std_rewards.append(0)
-                continue
+                # # for re, fs, rt in rollouts:
+                #     # print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
+                # if not valid_rollout_rewards:
+                #     continue
+                # all_rewards.append(np.mean(valid_rollout_rewards).item())
+                # max_rewards.append(max(valid_rollout_rewards))
+                # std_rewards.append(0)
+                # continue
 
             rollouts = [rollouts[p] for p in valid_rollout_indices]
+            
             print("\nRollouts:", [round(x[0], 2) for x in rollouts])
-            print(train_set[i%len(train_set)]['prompt'])
-            # print(train_set[i%len(train_set)]['ground_tool_call'])
+            # print(train_set[i%len(train_set)]['prompt'])
             for re, fs, rt in rollouts:
                 print(f"{re:.2f}: {tokenizer.decode(rt.tolist())}")
-            # print()
+            print()
+
             # Store data for the optimization step
             group_rewards.extend([x[0] for x in rollouts])
             rollout_tokens.extend([x[1] for x in rollouts])

@@ -46,7 +46,7 @@ class TrainConfig:
     # Continued SFT LR: 1e-5
     MAX_LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 0.1
-    QUANTIZATION = 8
+    QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 1
     TRAIN_LABEL = ("c" if VERSION == "instruct" else "") + TRAIN_TYPE
     SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v12"
@@ -72,6 +72,7 @@ print(f"Model path: weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}
 # model.generation_config.eos_token_id = tokenizer.eos_token_id
 
 if TrainConfig.QUANTIZATION is not None:
+    print("WARNING: QUANTIZATION WOULD MAKE SOME/MOST PARAMETERS UNTRAINABLE")
     nn.quantize(model, group_size=64, bits=TrainConfig.QUANTIZATION)
     print(f"Model quantized to {TrainConfig.QUANTIZATION} bits")
 model.train()

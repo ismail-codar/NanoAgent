@@ -13,6 +13,27 @@ import ollama
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+OLLAMA_MODEL = "qwen3:0.6b"
+# OLLAMA_MODEL = "gemma3:270m"
+
+def get_llm_response(messages, think=False, n_tokens=2):
+    if think:
+        assert n_tokens >= 8, 'Number of generating tokens must be higher if reasoning/think is set to True'
+    ret = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=messages,
+        stream=False,
+        think=think,
+        options={
+            # 'ctx': 512,
+            'temperature': 0.,
+            'num_predict': n_tokens
+        },   
+    )
+
+    return ret.message.thinking, ret.message.content
+
+
 def validate_format(text):
     """
     Validate if the text strictly follows the pattern:
@@ -138,7 +159,7 @@ Example:
 
     # First call: Initial chat with streaming enabled
     resp = ollama.chat(
-        model="qwen3:0.6b",
+        model=OLLAMA_MODEL,
         messages=messages,
         stream=False,
         think=False,
@@ -172,3 +193,10 @@ def thinking_scorer(llm_gen, tools_gen, def_tools):
         return 1
     return -1
 
+
+if __name__ == '__main__':
+    pass
+#     The best way to invest in crypto currency. Use the phrase "the best of both worlds".<|im_end|>
+# <|im_start|>assistant
+
+# 1.00: No, "the best of both worlds" is not the phrase but rather a sentiment that suggests a combination of benefits from both forms of investment, making it ideal for someone looking for a balanced strategy.<|im_end|>
