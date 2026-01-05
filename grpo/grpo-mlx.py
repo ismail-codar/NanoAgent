@@ -3,6 +3,7 @@
 # https://abderrahmanskiredjgithub.io/the-illustrated-grpo/The%20Illustrated%20GRPO.pdf
 # https://github.com/huggingface/trl/issues/3662
 # https://huggingface.co/docs/trl/main/en/grpo_trainer#trl.GRPOConfig
+# https://towardsdatascience.com/how-to-finetune-small-language-models-to-think-with-reinforcement-learning/
 
 import json
 import os
@@ -51,7 +52,7 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 500 #3_000
-    GENERATE_DATA = True
+    GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 512 #64
     SAVE_FREQ = 50
@@ -82,10 +83,10 @@ class TrainConfig:
     CONST_TOK_SCALE = True
     SAMPLING = "token"
     SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE = 1
-    MIN_P = 0.2 # Expected ~0.2 for Smollm2-135M
+    TEMPERATURE = 0.7 # Better to keep <= 0.9
+    MIN_P = None # Expected ~0.2 for Smollm2-135M
     TOP_K = None
-    TOP_P = None # Important: Only ~ 0.95 gave increasing reward for Smollm2-135M
+    TOP_P = 0.95 # Important: Only ~ 0.95 gave increasing reward for Smollm2-135M
 
 # GSPO Constraints:
 # -----------------
@@ -814,7 +815,7 @@ def grpo_train_loop(
                     re in valid_rollout_rewards
                 ):
                     continue
-                elif rt not in unq_rolls:
+                elif rt not in unq_rolls and re not in valid_rollout_rewards:
                     valid_rollout_indices.append(ridx)
                     unq_rolls.add(rt)
                     valid_rollout_rewards.append(re)
