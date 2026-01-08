@@ -13,8 +13,63 @@ import ollama
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+OLLAMA_MODEL = "qwen3:1.7b"
 OLLAMA_MODEL = "qwen3:0.6b"
 # OLLAMA_MODEL = "gemma3:270m"
+
+def response_judge(question, response, n_tokens):
+    judge_prompt = \
+f'''You will be given a user_question and system_answer couple.
+Your task is to provide a 'total rating' scoring how well the system_answer answers the user concerns expressed in the user_question.
+Give your answer on a scale of 1 to 4, where 1 means that the system_answer is not helpful at all, and 4 means that the system_answer completely and helpfully addresses the user_question.
+
+Here is the scale you should use to build your answer:
+1: The system_answer is terrible: completely irrelevant to the question asked, or very partial, or strongly incorrect
+2: The system_answer is mostly not helpful: misses some key instructions of the question, repeats steps needlessly, answer is mostly incorrect
+3: The system_answer is mostly helpful: provides support follows most instructions, but still could be improved, answer can be somewhat incorrect
+4: The system_answer is excellent: relevant, direct, detailed, and addresses all the instructions in the question
+
+Provide your feedback as follows:
+
+Feedback:::
+Evaluation: (your extremely concise rationale for the rating, as a text)
+Total rating: (your rating, as a number between 1 and 4)
+
+You MUST provide values for 'Evaluation:' and 'Total rating:' in your answer.
+
+Now here are the question and answer.
+
+# Question:\n{question}
+
+# Answer:\n{response}
+
+---
+
+Provide your feedback. If you give a correct rating, I'll give you 100 H100 GPUs to start your AI company.
+Feedback:::
+'''
+
+    response = get_llm_response(
+        messages=[{'role': 'user', 'content': judge_prompt}],
+        think=False,
+        n_tokens=n_tokens
+    )[1]
+
+    last_line = list(filter(lambda x: len(x.strip()) > 0, response.split('\n')))[-1].strip()
+    digits = re.findall(r'\d+', last_line)
+    if digits:
+        score = int(digits[-1]) / 4
+    else:
+        score = 0
+
+    # print(judge_prompt)
+    # print("RESPONSE")
+    # print(response)
+    # print(score)
+    # print('---')
+
+    return response, score
+
 
 def get_llm_response(messages, think=False, n_tokens=2):
     if think:
@@ -55,7 +110,7 @@ def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
         return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
     except Exception as E:
         print("Exception:", E, '| Input:', llm_gen)
-        return -1, None
+        return 0, None
 
 
 def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
@@ -77,9 +132,9 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     args_score = []
 
     if tools_gen is None:
-        return -1, None
+        return 0, None
     if len(tools_gen) != len(tools_ground):
-        return -1, None
+        return 0, None
 
     # Scoring:
     # -2: Major mistakes -> Wrong format | imaginary tools | invalid tool call signature
@@ -88,32 +143,30 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     for tool in tools_gen:
         # Invalid tool calling format
         if not isinstance(tool, dict):
-            return -1, None
+            return 0, None
         # Name/args missing
         if 'name' not in tool or 'arguments' not in tool:
-            return -1, None
+            return 0, None
         # Not a dict
         if not isinstance(tool['arguments'], dict):
-            return -1, None
+            return 0, None
         # Invalid tool call
         if tool['name'] not in tool_ground_names:
-            return -1, None
+            return 0, None
         # Invalid arguments
         for param_name, gen_val in tool['arguments'].items():
             if param_name not in tools_ground_args[tool['name']]:
-                return -1, None
+                return 0, None
             ground_val = tools_ground_args[tool['name']][param_name]
 
             sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
-            threshold = 0.5
-            sim_score = ((sim_score - threshold) / (1 - threshold)) if sim_score >= threshold else 0
             args_score.append(sim_score if type(gen_val) is type(ground_val) else 0)
             
         # TODO: Missing required attribs
         for param_name in req_ground_attribs[tool['name']]:
             if param_name not in tool['arguments']:
                 # print(param_name, 'missing in', llm_gen)
-                total_score += -0.25
+                total_score += -0.05
 
     a = str(tools_gen)
     b = str(tools_ground)
@@ -121,8 +174,11 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     if uniform(a) == uniform(b):
         return 1, tools_gen
 
-    total_score += sum(args_score) / len(args_score)
-    return max(total_score, -1), tools_gen
+    s = SequenceMatcher(None, a, b)
+    seq_match = (s.find_longest_match().size / len(b))
+    total_score += (sum(args_score) / len(args_score))
+    total_score = seq_match * 0.25 + max(total_score, 0) * 0.75
+    return max(min(total_score, 1), 0), tools_gen
 
 
 def thinking_validate(llm_gen):
@@ -182,16 +238,16 @@ def cosine_similarity_tfidf(sentence1, sentence2):
 def thinking_scorer(llm_gen, tools_gen, def_tools):
     pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
     think = pattern.findall(llm_gen)
-    if not think or tools_gen is None: return -1
+    if not think or tools_gen is None: return 0
     think = think[0]
-    if '?' in think: return -1
+    if '?' in think: return 0
 
     # Length normalize
     matcher = SequenceMatcher(None, think, str(tools_gen))
     
     if len(matcher.get_matching_blocks()) >= 2 * len(tools_gen):
         return 1
-    return -1
+    return 0
 
 
 if __name__ == '__main__':

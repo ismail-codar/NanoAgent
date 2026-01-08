@@ -1,7 +1,8 @@
 import random
 import re
 from functools import partial
-from .verifiers import get_llm_response
+from .verifiers import get_llm_response, response_judge
+
 
 def scorer(llm_gen, question, answer, diff=5):
     last_line = list(filter(lambda x: len(x.strip()) > 0, llm_gen.split('\n')))[-1].strip()
@@ -9,28 +10,10 @@ def scorer(llm_gen, question, answer, diff=5):
     if digits:
         digit = int(digits[-1])
         if abs(digit - answer) <= diff:
-            return ((diff - abs(digit - answer)) / diff) * llm_verifier(question, answer)
+            score = ((diff - abs(digit - answer)) / diff)
+            judge_score = response_judge(question=question, response=llm_gen, n_tokens=128)[1]
+            return score * 0.5 + judge_score * 0.5
     return 0
-
-
-def llm_verifier(question, answer):
-    prompt = """You will be given a Question and a Response.
-Your task is to evaluate whether the response is coherent and correct with respect to the question.
-Reason internally in 3-4 sentences to check factual accuracy, logical consistency, and whether the response directly addresses the question.
-Only output 'True' if the response is coherent and correct; otherwise, output 'False'."""
-
-    think, verdict = get_llm_response(
-        messages=[
-            {'role': 'system', 'content': prompt},
-            {'role': 'user', 'content': f'# Question:\n{question}\n\n# Answer:{answer}'}
-        ])
-    
-    for _ in range(3):
-        ret = verdict.strip().lower()
-        if ret == 'true':
-            return 1
-    return 0
-
 
 
 def easymath(tokenizer, think=False):
@@ -71,7 +54,7 @@ def easymath(tokenizer, think=False):
             ]
         else:
             messages = [
-                {"role": "user", "content": ques + "\nThink step-by-step before giving answer."},
+                {"role": "user", "content": ques + "\nThink before giving answer."},
                 # {"role": "assistant", "content": random.choice(["Okay,", "Let's see,", "The user", "Let's think step by step"])
             ]
 
