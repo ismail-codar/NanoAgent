@@ -56,13 +56,13 @@ You have access to the following tools/python-functions:
 For each function execution, call functions along with associated attribute names and values inside <tool_call></tool_call> tags."""
 
 
-TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools></tools> tags. 
+TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools> </tools> tags. 
 Based on question, you may need to make one or more function/tool calls to answer user.
 
 You have access to the following tools/functions:
 <tools>{tools}</tools>
 
-For each function call, return a JSON list object with function name and arguments within <tool_call></tool_call> tags."""
+For each function call, return a JSON list object with function name and arguments within <tool_call> </tool_call> tags."""
 
 
 def get_tokenizer(model_path, add_bos=False):

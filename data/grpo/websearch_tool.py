@@ -64,10 +64,10 @@ def tool_calling_traces(tokenizer, prompt_token_len):
                 # Append this as a message
                 all_messages.append({
                     "prompt": tokenizer.apply_chat_template(
-                        messages + [{"role": "assistant", "content": "<tool_call>"}],
-                        add_generation_prompt=False,
+                        messages, #+ [{"role": "assistant", "content": "<tool_call>"}],
+                        add_generation_prompt=True,
                         tokenize=False,
-                        continue_final_message=True,
+                        continue_final_message=False,
                     ),
                     "messages": messages,
                     "def_tools": tools,
@@ -113,7 +113,7 @@ def tool_calling_traces(tokenizer, prompt_token_len):
 def scorer(llm_gen, tools_ground, def_tools):
     # Adding think tag (prefilled in dataset)
     # Tool score
-    llm_gen = "<tool_call>" + llm_gen
+    # llm_gen = "<tool_call>" + llm_gen
     # print("LLM_GEN:", llm_gen)
     tool_score, tools_gen = tool_scorer(llm_gen, tools_ground, def_tools)
     # if tool_score <= 0:

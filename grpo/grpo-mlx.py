@@ -54,26 +54,26 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 5000 #3_000
-    GENERATE_DATA = True
+    GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 384 #64
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 1e-5
     WEIGHT_DECAY = 0
     EPSILON_MIN = 3e-2    # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
-    EPSILON_HIGH = 4e-2 # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
-    GROUP_SIZE = 4 # 4
+    EPSILON_HIGH = 4e-2   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
+    GROUP_SIZE = 4
     WARMUP_STEPS = 10 # 50
     DECAY_STEPS = 20 # 10
-    BETA = 0 # 0.04
+    BETA = 0.04 # 0.04
     UPDATE_WEIGHT = 1 # 4 - Could give smoother & stable learning while compromising memory
     EVAL_STEPS = 100
     NUM_ITER = 1
     GRAD_ACCUM = 1
     GRAD_NORM = 1
-    REF_MODEL_MIXUP_ALPHA = 1 # 0.6
-    MAX_INPUT_LEN = 768 # 1536
+    REF_MODEL_MIXUP_ALPHA = 0 # 0.6
+    MAX_INPUT_LEN = 512 # 768
     SAVE_PATH = "weights/NanoAgent-135M-grpo-web"
     DATA_PATH = "data/datasets/grpo_mix.pickle"
     MODEL = "quwsarohi/NanoAgent-135M" # "HuggingFaceTB/SmolLM2-135M-Instruct" "weights/SmolLM2-360M-mlx-instruct"
@@ -269,7 +269,7 @@ def tool_tokens(ground_tool_call):
 
 
 if TrainConfig.GENERATE_DATA:
-    ds_size = 4 * TrainConfig.ITERS
+    ds_size = 2 * TrainConfig.ITERS
     sz = int(ds_size * 0.3)
     train_ds = autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN)
     train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)[:sz]
@@ -278,20 +278,20 @@ if TrainConfig.GENERATE_DATA:
     train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
     sz = int(ds_size * 0.05)
     train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
-    sz = int(ds_size * 0.05)
-    train_ds += needle_haystack(tokenizer, size=TrainConfig.MAX_INPUT_LEN, prompt_token_len=TrainConfig.MAX_INPUT_LEN)[:sz]
     sz = int(ds_size * 0.1)
+    train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN)[:sz]
+    sz = int(ds_size * 0.15)
     train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz)
     sz = int(ds_size * 0.1)
     train_ds += syllogism(tokenizer, size=sz)
     sz = int(ds_size * 0.05)
     train_ds += family_relationships(tokenizer, size=sz)
-    sz = int(ds_size * 0.05)
+    sz = int(ds_size * 0.15)
     train_ds += gsm_symbolic(tokenizer, size=sz)
     sz = int(ds_size * 0.1)
-    train_ds += list_functions(tokenizer, size=sz)
-    sz = int(ds_size * 0.1)
-    train_ds += codeio(tokenizer, size=sz)
+    train_ds += chain_sum(tokenizer, size=sz)
+    # sz = int(ds_size * 0.1)
+    # train_ds += codeio(tokenizer, size=sz)
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
     with open(TrainConfig.DATA_PATH, 'wb') as fp:
@@ -318,7 +318,7 @@ def evaluate(eval_model, runs=4, temp=0.):
     eval_model.eval()
     for idx, data in enumerate(eval_ds):
         # Removing tool_call lead
-        prompt_tokens = tokenizer.encode(data['prompt'].rstrip('<tool_call>'))
+        prompt_tokens = tokenizer.encode(data['prompt'])#.rstrip('<tool_call>'))
         scorer = data['scorer']
         for _ in range(runs):
             response = generate(
@@ -328,7 +328,7 @@ def evaluate(eval_model, runs=4, temp=0.):
                 max_tokens=TrainConfig.GEN_LEN,
                 sampler=None if temp == 0 else lambda x: mx.random.categorical(x / temp, axis=-1)
             )
-            response = response.lstrip('<tool_call>')
+            # response = response.lstrip('<tool_call>')
             rewards.append(scorer(response))
     return rewards
 
@@ -747,7 +747,7 @@ def grpo_train_loop(
     while len(losses) < TrainConfig.ITERS:
         # Evaluation
         if len(losses) % TrainConfig.EVAL_STEPS == 0 and not skipped:
-            # eval_sampling = evaluate(model, runs=2, temp=0.4)
+            # eval_sampling = evaluate(model, runs=2, temp=0.3)
             eval_greedy = evaluate(model, runs=1, temp=0)
             eval_sampling = eval_greedy
             eval_rewards.append([
@@ -839,7 +839,7 @@ def grpo_train_loop(
             if len(valid_rollout_indices) < 2 or (min(valid_rollout_rewards) == max(valid_rollout_rewards)):
                 print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
                 # print(train_set[i%len(train_set)]['prompt'])
-                # for re, fs, rt in rollouts:
+                # for re, fs, rt in rollouts[:4]:
                     # print(f"{re:.2f}: --> {tokenizer.decode(rt.tolist())}")
                 continue
 
@@ -949,13 +949,11 @@ def grpo_train_loop(
             mx.eval(model_old)
             model_old.eval().freeze()
         
-        if TrainConfig.BETA > 0:
-            # model_ref.update(model.parameters())
-            # nn.quantize(model_ref, bits=8)
+        if TrainConfig.BETA > 0 and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
             model_ref.update(interpolate_models(model_ref, model, TrainConfig.REF_MODEL_MIXUP_ALPHA))
             mx.eval(model_ref)
             model_ref.eval().freeze()
-            # print(f"\nIter {it+1}: Synced ref model weights.")
+            print(f"\nIter {len(losses)+1}: Synced ref model weights.")
 
 
         if len(losses) % TrainConfig.SAVE_FREQ == 0:

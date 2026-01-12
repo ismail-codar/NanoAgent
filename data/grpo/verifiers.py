@@ -13,20 +13,24 @@ import ollama
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# OLLAMA_MODEL = "qwen3:1.7b"
-OLLAMA_MODEL = "qwen3:0.6b"
+OLLAMA_MODEL = "qwen3:1.7b"
+# OLLAMA_MODEL = "qwen3:0.6b"
 # OLLAMA_MODEL = "gemma3:270m"
 
-def response_judge(question, response, n_tokens):
+def response_judge(question, response, n_tokens, ref_answer=None):
+    if ref_answer:
+        ref_answer = f'Here is a reference answer that would be helpful for your evaluation:\n# Reference Answer:\n{ref_answer}\n\n---'
+    else:
+        ref_answer = ''
     judge_prompt = \
-f'''You will be given a user_question and system_answer couple.
+f'''You will be given a user_question and system_answer couple. {"You will be also given a correct reference_answer." if ref_answer else ""}
 Your task is to provide a 'total rating' scoring how well the system_answer answers the user concerns expressed in the user_question.
 Give your answer on a scale of 1 to 4, where 1 means that the system_answer is not helpful at all, and 4 means that the system_answer completely and helpfully addresses the user_question.
 
 Here is the scale you should use to build your answer:
 1: The system_answer is terrible: completely irrelevant to the question asked, or very partial, or strongly incorrect
-2: The system_answer is mostly not helpful: misses some key instructions of the question, repeats steps needlessly, answer is mostly incorrect
-3: The system_answer is mostly helpful: provides support follows most instructions, but still could be improved, answer can be somewhat incorrect
+2: The system_answer is mostly not helpful: misses some key instructions of the question, repeats steps needlessly, answer is mostly incorrect, but contains missinformation & hallucination
+3: The system_answer is mostly helpful: provides support follows most instructions, but still could be improved, answer can be somewhat incorrect, with lesser missinformation & hallucination
 4: The system_answer is excellent: relevant, direct, detailed, and addresses all the instructions in the question
 
 Provide your feedback as follows:
@@ -41,11 +45,15 @@ Now here are the question and answer.
 
 # Question:\n{question}
 
+---
+
 # Answer:\n{response}
 
 ---
 
-Provide your feedback. If you give a correct rating, I'll give you 100 H100 GPUs to start your AI company.
+{ref_answer}
+
+Provide your feedback. Try your best to give a correct rating.
 Feedback:::
 '''
 
@@ -62,11 +70,11 @@ Feedback:::
     else:
         score = 0
 
+    # print("--- JUDGE PROMPT ---")
     # print(judge_prompt)
-    # print("RESPONSE")
+    # print("--- JUDGE RESPONSE ---")
     # print(response)
-    # print(score)
-    # print('---')
+    # print('Extracted Score:', score)
 
     return response, score
 

@@ -21,9 +21,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 def mobileactions(tokenizer, prompt_token_len):
     apply_chat_template = lambda seq: tokenizer.apply_chat_template(
                 seq,
-                add_generation_prompt=False,
+                add_generation_prompt=True,
                 tokenize=False,
-                continue_final_message=True,
+                continue_final_message=False,
             )
     
     def mapper(data):
@@ -46,7 +46,7 @@ def mobileactions(tokenizer, prompt_token_len):
             if t['name'] in called_tools_name:
                 continue
             del_idx.append(i)
-            if len(del_idx) == 3: break
+            if len(del_idx) == 4: break
         
         del_idx = sorted(del_idx, reverse=True)
         for di in del_idx:
@@ -58,7 +58,7 @@ def mobileactions(tokenizer, prompt_token_len):
                 "content": TOOL_TEMPLATE.format(tools=tool_shuffle(tools)) + '\n' + str(date_time)
             },
             {"role": "user", "content": user_question},
-            {"role": "assistant", "content": "<tool_call>"}
+            # {"role": "assistant", "content": "<tool_call>"}
         ]
         
         return {
@@ -82,7 +82,7 @@ from .verifiers import validate_format, tool_scorer, thinking_validate
 def scorer(llm_gen, tools_ground, def_tools):
     # Adding think tag (prefilled in dataset)
     # Tool score
-    llm_gen = "<tool_call>" + llm_gen
+    # llm_gen = "<tool_call>" + llm_gen
     tool_score, tools_gen = tool_scorer(llm_gen, tools_ground, def_tools)
     return tool_score
 

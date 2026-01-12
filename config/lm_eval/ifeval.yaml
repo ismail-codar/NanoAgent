@@ -1,6 +1,6 @@
 model: hf
 model_args:
-  pretrained: weights/NanoAgent-135M-drgrpo-sapo
+  pretrained: weights/NanoAgent-135M-grpo-web
   dtype: bfloat16
 
 tasks:
