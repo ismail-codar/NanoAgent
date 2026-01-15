@@ -164,7 +164,7 @@ else:
 
 if TrainConfig.BETA > 0:
     # The reference model for KL-div (freezed)
-    model_ref = deepcopy(model)
+    model_ref = load(cache_mlx_path, return_config=False)[0] #deepcopy(model)
     model_ref.eval().freeze()
 else:
     model_ref = None
@@ -270,28 +270,27 @@ def tool_tokens(ground_tool_call):
 
 if TrainConfig.GENERATE_DATA:
     ds_size = 2 * TrainConfig.ITERS
-    sz = int(ds_size * 0.3)
+    sz = int(ds_size * 0.35)
     train_ds = autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN)
     train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)[:sz]
-    # train_ds += easymath(tokenizer)[:3000]
-    sz = int(ds_size * 0.05)
+    sz = int(ds_size * 0.025)
     train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
-    sz = int(ds_size * 0.05)
+    sz = int(ds_size * 0.025)
     train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
-    sz = int(ds_size * 0.1)
+    sz = int(ds_size * 0.05)
     train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN)[:sz]
     sz = int(ds_size * 0.15)
     train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz)
-    sz = int(ds_size * 0.1)
-    train_ds += syllogism(tokenizer, size=sz)
-    sz = int(ds_size * 0.05)
-    train_ds += family_relationships(tokenizer, size=sz)
     sz = int(ds_size * 0.15)
-    train_ds += gsm_symbolic(tokenizer, size=sz)
+    train_ds += syllogism(tokenizer, size=sz)
+    # sz = int(ds_size * 0.05)
+    # train_ds += family_relationships(tokenizer, size=sz)
     sz = int(ds_size * 0.1)
+    train_ds += gsm_symbolic(tokenizer, size=sz)
+    sz = int(ds_size * 0.05)
     train_ds += chain_sum(tokenizer, size=sz)
-    # sz = int(ds_size * 0.1)
-    # train_ds += codeio(tokenizer, size=sz)
+    sz = int(ds_size * 0.1)
+    train_ds += zebra_puzzles(tokenizer, size=sz)
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
     with open(TrainConfig.DATA_PATH, 'wb') as fp:
@@ -318,7 +317,7 @@ def evaluate(eval_model, runs=4, temp=0.):
     eval_model.eval()
     for idx, data in enumerate(eval_ds):
         # Removing tool_call lead
-        prompt_tokens = tokenizer.encode(data['prompt'])#.rstrip('<tool_call>'))
+        prompt_tokens = tokenizer.encode(data['prompt'])
         scorer = data['scorer']
         for _ in range(runs):
             response = generate(
@@ -328,7 +327,6 @@ def evaluate(eval_model, runs=4, temp=0.):
                 max_tokens=TrainConfig.GEN_LEN,
                 sampler=None if temp == 0 else lambda x: mx.random.categorical(x / temp, axis=-1)
             )
-            # response = response.lstrip('<tool_call>')
             rewards.append(scorer(response))
     return rewards
 
@@ -727,7 +725,7 @@ def grpo_train_loop(
     if model_old is not None:
         model_old.update(model.parameters())
         model_old.eval().freeze()
-    if model_ref is not None:
+    if model_ref is not None and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
         model_ref.update(model.parameters())
         model_ref.eval().freeze()
     
@@ -830,6 +828,7 @@ def grpo_train_loop(
                     re in valid_rollout_rewards
                 ):
                     continue
+                # elif re not in valid_rollout_rewards:
                 else:
                     valid_rollout_indices.append(ridx)
                     valid_rollout_rewards.append(re)
@@ -919,8 +918,7 @@ def grpo_train_loop(
                     mx.eval(model.parameters(), optimizer.state)
                     # print("Model weight updated")
             
-            _loss += - (loss.item() / TrainConfig.NUM_ITER)
-            pbar.update(TrainConfig.BATCH_SIZE)
+            _loss += (loss.item() / TrainConfig.NUM_ITER)
             skipped = False
 
         losses.append(_loss)
@@ -935,6 +933,7 @@ def grpo_train_loop(
             pbar.set_description(
                 f"Loss: {tot_loss / (len(losses) + 1):.4f} | LR: {learning_rates[-1][-1]:1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][0]['eval_score']:.2f} | Rewards: {rwds}"
             )
+            pbar.update(TrainConfig.BATCH_SIZE)
         del grads, loss
 
         # Sync old model weights
@@ -951,7 +950,7 @@ def grpo_train_loop(
         
         if TrainConfig.BETA > 0 and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
             model_ref.update(interpolate_models(model_ref, model, TrainConfig.REF_MODEL_MIXUP_ALPHA))
-            mx.eval(model_ref)
+            mx.eval(model_ref.state)
             model_ref.eval().freeze()
             print(f"\nIter {len(losses)+1}: Synced ref model weights.")
 
