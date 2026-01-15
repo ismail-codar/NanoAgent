@@ -183,3 +183,4 @@ cython_debug/
 weights/
 data/datasets/
 benchmarks
+lm-evaluation-harness/
