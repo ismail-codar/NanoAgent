@@ -88,7 +88,7 @@ def get_tokenizer(model_path, add_bos=False):
             - `unk_token_id` should be 0.
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, add_bos_token=False)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, add_bos_token=add_bos)
 
     if model_path.startswith('HuggingFaceTB'):
         print("Using SmolLM2 tokenizer")

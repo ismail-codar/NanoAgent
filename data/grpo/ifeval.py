@@ -9,8 +9,33 @@ from data.grpo.IFEvalG import instructions_registry
 from abc import ABC, abstractmethod
 from typing import Any
 import asyncio
+import random
 from datasets import load_dataset
 from data.grpo.verifiers import response_judge
+
+KSHOT_EXAMLPES = [
+    [
+        {'role': 'user', 'content': 'Greet me in lowercase with only one exclamation mark'},
+        {'role': 'assistant', 'content': 'hi! how can i help you?'}
+    ],
+    [
+        {'role': 'user', 'content': 'What is 2+3= Reply the number in two decimal places'},
+        {'role': 'assistant', 'content': '5.00'}
+    ],
+    [
+        {'role': 'user', 'content': 'Respond with yes or no only: Is water wet?'},
+        {'role': 'assistant', 'content': 'yes'}
+    ],
+    [
+        {'role': 'user', 'content': 'Write the word HELLO in lowercase'},
+        {'role': 'assistant', 'content': 'hello'}
+    ],
+    [
+        {'role': 'user', 'content': 'What is the capital of France? Answer in one word.'},
+        {'role': 'assistant', 'content': 'Paris'}
+    ],
+    [], [], []
+]
 
 
 def filter_non_english(text: str) -> bool:
@@ -46,9 +71,7 @@ class VerifierFunction(ABC):
 
 
     @abstractmethod
-    def __call__(
-        self, tokenized_prediction: list[int], prediction: str, label: Any, query: str | None = None
-    ):
+    def __call__(self, prediction: str, label: str | dict, question: str):
         """
         Evaluate the given prediction against the ground truth (or constraint).
 
@@ -62,9 +85,7 @@ class VerifierFunction(ABC):
             VerificationResult
         """
 
-    async def async_call(
-        self, tokenized_prediction: list[int], prediction: str, label: Any, query: str | None = None
-    ):
+    async def async_call(self, prediction: str, label: str | dict, question: str):
         """
         Asynchronous version of __call__. By default, it runs the synchronous __call__ in a thread pool.
         Subclasses can override this method for truly asynchronous implementation.
@@ -80,7 +101,7 @@ class VerifierFunction(ABC):
         """
         # Run the synchronous __call__ in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self.__call__(tokenized_prediction, prediction, label, query))
+        return await loop.run_in_executor(None, lambda: self.__call__(prediction, label, question))
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name}, weight={self.weight})"
@@ -127,6 +148,10 @@ class IFEvalVerifier(VerifierFunction):
         if score <= 0:
             return score
         
+        # LLM reward hacking the answer
+        if len(prediction.strip().split()) <= 16:
+            return 0
+        
         n_tries = 1
         judge_scores = []
         for _ in range(n_tries):
@@ -138,13 +163,13 @@ class IFEvalVerifier(VerifierFunction):
 
 scorer = IFEvalVerifier()
 
-def ifeval_ds(tokenizer, prompt_token_len, n_instructions=None):
+def ifeval_ds(tokenizer, prompt_token_len, n_instructions=None, kshot=False):
     dataset = load_dataset("allenai/Dolci-RL-Zero-IF-7B")['train']
     # dataset = dataset.map(lambda x: {'eval_funcs': list(set(x['eval_funcs']))})
     dataset = dataset.map(lambda x: {
         'question': x['prompt'].strip().lstrip('user:').strip(),
         'prompt': tokenizer.apply_chat_template(
-            [{'role': 'user', 'content': x['prompt'].strip().lstrip('user:').strip()}],
+            (random.choice(KSHOT_EXAMLPES) if kshot else []) + [{'role': 'user', 'content': x['prompt'].strip().lstrip('user:').strip()}],
             add_generation_prompt=True,
             tokenize=False,
             continue_final_message=False,

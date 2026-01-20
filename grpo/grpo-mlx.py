@@ -31,6 +31,7 @@ import random
 from mlx.utils import tree_flatten, tree_unflatten, tree_map
 from mlx_lm import batch_generate, generate, load, convert
 from mlx_lm.utils import load_model, save_model, dequantize_model
+from mlx_lm.sample_utils import make_sampler
 # from data.grpo.salseforce_tool import salesfores_toolcall
 from data.grpo.websearch_tool import tool_calling_traces
 from data.grpo.mobile_actions import mobileactions
@@ -40,7 +41,7 @@ from data.grpo.ifeval import ifeval_ds
 # from data.grpo.gorilla_tool import gorilla_openfun
 from data.grpo.reasoning_gym import *
 from scipy.ndimage import gaussian_filter1d
-from utils.utils import sampler, grad_checkpoint, split_grads
+from utils.utils import grad_checkpoint, split_grads
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 plt.ioff()
@@ -55,40 +56,40 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 1000 #3_000
-    GENERATE_DATA = False
+    GENERATE_DATA = True
     BATCH_SIZE = 1
-    GEN_LEN = 384
+    GEN_LEN = 256 + 128
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 2e-6
     WEIGHT_DECAY = 0
     EPSILON_MIN = 3e-2   # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
     EPSILON_HIGH = 4e-2   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
-    GROUP_SIZE = 4
+    GROUP_SIZE = 6
     WARMUP_STEPS = 50 # 50
     DECAY_STEPS = 40 # 10
     BETA = 0 # 0.04
     UPDATE_WEIGHT = 1 # 4 - Could give smoother & stable learning while compromising memory
-    EVAL_STEPS = 100
+    EVAL_STEPS = 50
     NUM_MODEL_UPDATE_MU = 1
     GRAD_ACCUM = 1
     GRAD_NORM = 1
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
-    SAVE_PATH = "weights/NanoAgent-135M-gspo"
+    SAVE_PATH = "weights/NanoAgent-135M-grpo"
     DATA_PATH = "data/datasets/grpo_mix.pickle"
     MODEL = "quwsarohi/NanoAgent-135M" #"google/functiongemma-270m-it" #"weights/SmolLM2-360M-mlx-instruct" #"quwsarohi/NanoAgent-135M" # "HuggingFaceTB/SmolLM2-135M-Instruct" "weights/SmolLM2-360M-mlx-instruct"
-    FREEZE_LAYERS = []
+    FREEZE_LAYERS = [] # embed_tokens
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
-    EVAL_SAMPLES = 100
+    EVAL_SAMPLES = 75
     TQDM = True
     STD_NORM = True
     CONST_TOK_SCALE = False
     SAMPLING = "sequence"
     SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
     # TEMPERATURE = [0.9, 0.8, 0.7, .65, 0.6, 0.5] #0.7 # Better to keep <= 0.9
-    TEMPERATURE = 0.7 # 0.7
+    TEMPERATURE = 0.8
     MIN_P = None # Expected ~0.2 for Smollm2-135M
     TOP_K = None
     TOP_P = 0.9 # Important: Only ~ 0.95 gave increasing reward for Smollm2-135M
@@ -152,7 +153,7 @@ if not os.path.exists(cache_mlx_path):
     sys.exit()
 
 
-model, _, model_config = load(cache_mlx_path, return_config=True)
+model, tokenizer_mlx, model_config = load(cache_mlx_path, return_config=True)
 
 if TrainConfig.QUANTIZATION is not None:
     nn.quantize(model, group_size=64, bits=TrainConfig.QUANTIZATION)
@@ -173,6 +174,7 @@ else:
     model_ref = None
 
 tokenizer = get_tokenizer("HuggingFaceTB/SmolLM2-135M", add_bos=False)
+# tokenizer = get_tokenizer("google/functiongemma-270m-it", add_bos=True)
 assert tokenizer.pad_token_id != tokenizer.eos_token_id, "Pad token and EOS token must be different"
 
 # Learning Rate Schedulers
@@ -241,7 +243,7 @@ scheduler = linear_decay_with_warmup(
 # )
 
 optimizer = optim.AdamW(
-    learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY
+    learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
 )
 
 # Interesting writings:
@@ -274,26 +276,26 @@ def tool_tokens(ground_tool_call):
 if TrainConfig.GENERATE_DATA:
     ds_size = 4 * TrainConfig.ITERS
     train_ds = []
-    sz = int(ds_size * 1)
+    sz = int(ds_size * 0.5)
     # train_ds = autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN)
     # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)[:sz]
-    train_ds = ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, 2)
+    train_ds = ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, 2, kshot=True)
     # sz = int(ds_size * 0.5)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
     # sz = int(ds_size * 0.025)
     # train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
     # sz = int(ds_size * 0.1)
     # train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN)[:sz]
-    # sz = int(ds_size * 0.15)
-    # train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz)
+    sz = int(ds_size * 0.125)
+    train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
     # # sz = int(ds_size * 0.15)
     # # train_ds += syllogism(tokenizer, size=sz)
-    # sz = int(ds_size * 0.1)
-    # train_ds += gsm_symbolic(tokenizer, size=sz)
-    # sz = int(ds_size * 0.1)
-    # train_ds += chain_sum(tokenizer, size=sz)
-    # sz = int(ds_size * 0.1)
-    # train_ds += zebra_puzzles(tokenizer, size=sz)
+    sz = int(ds_size * 0.125)
+    train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.1)
+    train_ds += chain_sum(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.1)
+    train_ds += zebra_puzzles(tokenizer, size=sz)
     # random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
     with open(TrainConfig.DATA_PATH, 'wb') as fp:
@@ -310,28 +312,6 @@ if TrainConfig.EVAL_SAMPLES:
     train_ds = train_ds[:-TrainConfig.EVAL_SAMPLES]
 else:
     eval_ds = None
-
-# import ast
-# # inst_counter = defaultdict(int)
-# def ifeval_sort(data):
-#     global inst_counter
-#     constraints = data['ground_truth']
-#     if not constraints:
-#         # inst_counter[0] += 1
-#         return 0
-#     constraints = ast.literal_eval(constraints[0])
-#     if not constraints:
-#         # inst_counter[0] += 1
-#         return 0
-#     constraints = constraints[0].get('instruction_id')
-#     # inst_counter[len(constraints)] += 1
-#     # print(len(constraints))
-#     return len(constraints)
-
-
-# print("IF-Eval Instruction Counter:", inst_counter)
-# train_ds = sorted(train_ds, key=ifeval_sort)
-# print(train_ds[0]['ground_truth'])
 
 
 def evaluate(eval_model, runs=4, temp=0.):
@@ -396,16 +376,16 @@ def prog_graph(
     std_rewards = np.asarray(std_rewards)
     axes[1].plot(np.cumsum(all_rewards) / (np.arange(len(all_rewards)) + 1), color="tab:blue", alpha=0.8, linestyle=':', label='Cumulative Sum')
     axes[1].plot(mean_map(all_rewards), color="tab:blue", alpha=0.8, linestyle='--', label='Mean Win. 20')
-    # axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue", label='Smoothen')
-    axes[1].fill_between(
-        np.arange(len(all_rewards)),
-        all_rewards - std_rewards,
-        all_rewards + std_rewards,
-        color="tab:blue",
-        alpha=0.15,
-        # label="±1 Std"
-    )
-    axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
+    axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue", label='Smoothen')
+    # axes[1].fill_between(
+    #     np.arange(len(all_rewards)),
+    #     all_rewards - std_rewards,
+    #     all_rewards + std_rewards,
+    #     color="tab:blue",
+    #     alpha=0.15,
+    #     # label="±1 Std"
+    # )
+    # axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
     axes[1].set_title("Rewards")
     axes[1].legend()
     axes[1].grid(True)
@@ -470,6 +450,7 @@ def load_state(path=TrainConfig.SAVE_PATH):
 
 
 if TrainConfig.LOAD_PREV:
+    del model
     (
         model,
         optimizer,
@@ -615,17 +596,13 @@ def calculate_log_probs(model, io_toks, ans_toks, pad_tok_id):
 
     return selected_log_probs, pad_mask
 
+
 # @partial(mx.compile, inputs=state)
 def grpo_loss_fn(
     model, model_old, model_ref, io_toks, a_toks, advantages, beta, pad_tok_id
-):
-    model.train()
-    # if model_old is not None:
-    #     model_old.eval()
-    # if model_ref is not None:
-    #     model_ref.eval()
-    
+):    
     """The GRPO loss function."""
+    model.train()
     # Get log probs from the trainable model (π_θ)
     log_probs, pad_mask = calculate_log_probs(model, io_toks, a_toks, pad_tok_id)
     # Get log probs from the old non-trainable model (π_θ_old)
@@ -716,15 +693,65 @@ def pad_sequences(sequences, pad_token_id):
     padded_sequences = []
 
     for seq in sequences:
+        if isinstance(seq, list):
+            seq = mx.array(seq)
         if len(seq) < max_len:
             padding = mx.array([pad_token_id] * (max_len - len(seq)))
             padded_seq = mx.concatenate([seq, padding])
-
         else:
             padded_seq = seq
         padded_sequences.append(padded_seq)
 
     return mx.stack(padded_sequences)
+
+
+# @partial(mx.compile) #inputs=mx.random.state, outputs=mx.random.state)
+def rollout_batch(prompt, scorer, tokenizer, model, group_size):
+    prompt_tokens = tokenizer.encode(prompt)
+    sampler = make_sampler(
+        temp=TrainConfig.TEMPERATURE,
+        top_p=TrainConfig.TOP_P if TrainConfig.TOP_P else 0,
+        min_p=TrainConfig.MIN_P if TrainConfig.MIN_P else 0,
+        top_k=TrainConfig.TOP_K if TrainConfig.TOP_K else 0
+    )
+    
+    rollout_tokens, rollout_rewards, rollout_a_toks = [], [], []
+    model.eval()
+    # Generate responses/rollouts
+    for gitr in range(int(group_size * 1)):
+        # Generate a response
+        response = generate(
+            model,
+            tokenizer_mlx,
+            prompt_tokens,
+            max_tokens=TrainConfig.GEN_LEN,
+            sampler=sampler
+        )
+
+        response_tokens = tokenizer.encode(response, add_special_tokens=False)
+        # Avoiding truncated answers
+        if len(response_tokens) >= TrainConfig.GEN_LEN - 1:
+            continue
+
+        reward = float(scorer(response))
+        rollout_tokens.append(mx.array(prompt_tokens + response_tokens))
+        rollout_rewards.append(reward)
+        rollout_a_toks.append(mx.array(response_tokens))
+
+    if rollout_rewards:
+        rrewards = mx.array(rollout_rewards)
+        mean_reward = mx.mean(rrewards)
+        std_reward = mx.sqrt(mx.var(rrewards))
+        advantages = (rrewards - mean_reward)
+        if TrainConfig.STD_NORM:
+            advantages = advantages / (std_reward + 1e-12)  # Add epsilon for stability
+        advantages = advantages.tolist()
+        std_reward = std_reward.tolist()
+    else:
+        advantages, std_reward = [], []
+
+    return rollout_tokens, rollout_rewards, rollout_a_toks, advantages, std_reward
+    
 
 
 def grpo_train_loop(
@@ -789,128 +816,38 @@ def grpo_train_loop(
             ])
         
         skipped = True
-
         # 1. Sample a batch of prompts
         # batch_indices = [bi % len(train_set) for bi in range(it, it + batch_size)]
-        batch_indices = random.choices(range(len(train_set)), k=batch_size)
+        batch_index = random.choice(range(len(train_set)))
 
-        # 2. Rollout: Generate G responses for each prompt using the old model
-        rollout_tokens = []
-        rollout_rewards = []
-        rollout_a_toks = []
+        # 2. Rollout: Generate G responses for each prompt using the model/old_model
+        prompt = train_set[batch_index%len(train_set)]['prompt']
+        scorer = train_set[batch_index]['scorer']
+        rollout_tokens, rollout_rewards, rollout_a_toks, advantages, std_reward = rollout_batch(
+            prompt,
+            scorer, 
+            tokenizer, 
+            model,
+            group_size
+        )
 
-        # Batch loop
-        for i in batch_indices:
-            prompt_tokens = tokenizer.encode(train_set[i%len(train_set)]['prompt'])
-            scorer = train_set[i]['scorer']
-            group_rewards = []
-            rollouts = []
-            model.eval()
-            unique_responses = set()
-
-            # Generate responses/rollouts
-            for gitr in range(int(group_size * 1.5)):
-                # Generate a response
-                response = generate(
-                    model_old if model_old is not None else model,
-                    tokenizer,
-                    prompt_tokens,
-                    max_tokens=max_ans_len,
-                    sampler=partial(
-                        sampler, 
-                        # temperature=TrainConfig.TEMPERATURE - (gitr * 0.2),
-                        temperature=TrainConfig.TEMPERATURE,
-                        # temperature=TrainConfig.TEMPERATURE if not isinstance(TrainConfig.TEMPERATURE, list) else TrainConfig.TEMPERATURE[gitr%len(TrainConfig.TEMPERATURE)],
-                        min_p=TrainConfig.MIN_P, 
-                        top_p=TrainConfig.TOP_P, 
-                        top_k=TrainConfig.TOP_K)
-                )
-
-                # Check unique response
-                if response in unique_responses: continue
-                unique_responses.add(response)
-
-                response_tokens = tokenizer.encode(response, add_special_tokens=False)
-                # Avoiding truncated answers
-                if len(response_tokens) >= max_ans_len - 1:
-                    continue
-
-                # Embedding EOS token as model.generate removes it
-                response_tokens.append(tokenizer.eos_token_id)
-
-                reward = float(scorer(response))
-                full_sequence = mx.array(prompt_tokens + response_tokens)
-                rollouts.append((reward, full_sequence, mx.array(response_tokens)))
-
-                if len(rollouts) >= group_size:
-                    roll_rewards = [r[0] for r in rollouts]
-                    if min(roll_rewards) != max(roll_rewards):
-                        break
-
-            # Sort rewards hi to low
-            rollouts = sorted(rollouts, key=lambda x: x[0], reverse=True)
-            # DAPO: Pick rewards where we see a good reward distribution shift
-            valid_rollout_indices = []
-            valid_rollout_rewards = []
-
-            for ridx, (re, fs, rt) in enumerate(rollouts):
-                rt = tuple(rt.tolist())
-                # If rollout rewards are not diverse and we only have one to take, wait for diverse value
-                if (
-                    (len(valid_rollout_indices) == TrainConfig.GROUP_SIZE - 1) and \
-                    min(valid_rollout_rewards) == max(valid_rollout_rewards) and \
-                    re in valid_rollout_rewards
-                ):
-                    continue
-                elif re != 1 or (re not in valid_rollout_rewards):
-                # else:
-                    valid_rollout_indices.append(ridx)
-                    valid_rollout_rewards.append(re)
-                if len(valid_rollout_indices) == TrainConfig.GROUP_SIZE:
-                    break
-
-            if len(valid_rollout_indices) < 2 or (min(valid_rollout_rewards) == max(valid_rollout_rewards)):
-                print(f"\nNo diversity in group rewards: {[round(x[0], 2) for x in rollouts]}. Skipping...")
-                # print(train_set[i%len(train_set)]['prompt'])
-                # for re, fs, rt in rollouts[:4]:
-                    # print(f"{re:.2f}: --> {tokenizer.decode(rt.tolist())}")
-                continue
-
-            rollouts = [rollouts[p] for p in valid_rollout_indices]
-            print("\nRollouts:", [round(x[0], 2) for x in rollouts])
-            print(train_set[i%len(train_set)]['prompt'])
-            for re, fs, rt in rollouts:
-                print(f"{re:.2f}: --> {tokenizer.decode(rt.tolist())}")
-                print("---")
-            print()
-
-            # Store data for the optimization step
-            group_rewards.extend([x[0] for x in rollouts])
-            rollout_tokens.extend([x[1] for x in rollouts])
-            rollout_a_toks.extend([x[2] for x in rollouts])
-            
-            all_rewards.append(np.mean(group_rewards).item())
-            max_rewards.append(max(group_rewards))
-            rollout_rewards.append(mx.array(group_rewards))
-
-        if not rollout_rewards:
-            # print("Empty rollout rewards. Skipping...", flush=True)
+        if len(rollout_rewards) < group_size // 2:
+            print(f"Not enough samples to train: {[round(x, 2) for x in rollout_rewards]}. Skipping...", flush=True)
+            continue
+        if min(rollout_rewards) == max(rollout_rewards):
+            print(f"\nNo diversity in group rewards: {[round(x, 2) for x in rollout_rewards]}. Skipping...", flush=True)
             continue
 
-        # Compute Advantages
-        advantages = []
-        for rewards in rollout_rewards:
-            mean_reward = mx.mean(rewards)
-            std_reward = mx.sqrt(mx.var(rewards))
-            adv = (rewards - mean_reward) #/ std_reward
-            if TrainConfig.STD_NORM:
-                adv = adv / (std_reward + 1e-8)  # Add epsilon for stability
-            std_rewards.append(std_reward.item())
-            advantages.append(adv)
+        print("\nRollouts:", [round(x, 2) for x in rollout_rewards])
+        print(train_set[batch_index%len(train_set)]['prompt'])
+        for re, rt in zip(rollout_rewards, rollout_a_toks):
+            print(f"{re:.2f}: --> {tokenizer.decode(rt.tolist())}")
+            print("---")
+        print()
 
-        advantages = mx.concatenate(advantages)
         rollout_tokens_padded = pad_sequences(rollout_tokens, tokenizer.pad_token_id)
         rollout_a_toks_padded = pad_sequences(rollout_a_toks, tokenizer.pad_token_id)
+        advantages = mx.array(advantages)
 
         # Optimization Step
         _loss = 0
@@ -955,17 +892,21 @@ def grpo_train_loop(
             _loss += (loss.item() / TrainConfig.NUM_MODEL_UPDATE_MU)
             skipped = False
 
-        losses.append(_loss)
+        
+        # Logging
         if isinstance(optimizer, list):
             learning_rates.append((optimizer[0].learning_rate.item(), optimizer[1].learning_rate.item()))
         else:
             learning_rates.append((optimizer.learning_rate.item(), ))
+        losses.append(_loss)
         tot_loss += _loss
+        all_rewards.append(sum(rollout_rewards) / len(rollout_rewards))
+        max_rewards.append(max(rollout_rewards))
 
         if TrainConfig.TQDM:
             rwds = list(map(lambda x: round(x, 2), all_rewards[-3:]))
             pbar.set_description(
-                f"Loss: {tot_loss / (len(losses) + 1):.4f} | LR: {learning_rates[-1][-1]:1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][0]['eval_score']:.2f} | Rewards: {rwds}"
+                f"Loss: {tot_loss / (len(losses) + 1):.4f} | LR: {learning_rates[-1][-1]:1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max: {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][0]['eval_score']:.2f} | Rewards: {rwds}"
             )
             pbar.update(TrainConfig.BATCH_SIZE)
         del grads, loss
@@ -1024,7 +965,6 @@ def grpo_train_loop(
 
 model.unfreeze()
 mx.eval(model)
-
 # print(model)
 
 # Freeze model weights

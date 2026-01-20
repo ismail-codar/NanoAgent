@@ -44,7 +44,8 @@ def sampler(
         Sampled token indices
     """
     # Apply temperature
-    # logits = logits / max(temperature, 1e-6)
+    if temperature != 0 and temperature != 1:
+        logits = logits / max(temperature, 1e-16)
     # Convert to probabilities
     probs = mx.softmax(logits, axis=-1)
 
@@ -67,7 +68,7 @@ def sampler(
         probs, axis=-1, keepdims=True
     )
     # Sample
-    _logits = mx.log(probs) / temperature
+    _logits = mx.log(probs) # / temperature
     return mx.random.categorical(_logits)
 
 

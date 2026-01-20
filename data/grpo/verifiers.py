@@ -29,17 +29,17 @@ Your task is to provide a 'total rating' scoring how well the system_answer answ
 Give your answer on a scale of 1 to 4, where 1 means that the system_answer is not helpful at all, and 4 means that the system_answer completely and helpfully addresses the user_question.
 
 Here is the scale you should use to build your answer:
-1: The system_answer is terrible: completely irrelevant to the question asked, or very partial, or strongly incorrect, or repeats every information present in the question
-2: The system_answer is mostly not helpful: misses some key instructions of the question, repeats steps needlessly, answer is mostly incorrect and contains missinformation
-3: The system_answer is mostly helpful: follows most instructions but could be improved, answer can be somewhat incorrect
-4: The system_answer is excellent: relevant, direct, detailed, and addresses all the instructions in the question
+1: The system_answer is terrible: completely irrelevant to the question asked, or very partial, or strongly incorrect, or repetitive response
+2: The system_answer is mostly not helpful: misses some key instructions of the question, may repeat some steps needlessly
+3: The system_answer is mostly helpful: answer is complete, follows most instructions and does not repeat steps. But answer could be improved
+4: The system_answer is excellent: answer is complete, relevant, direct, detailed, and addresses all the instructions in the question
 
 You can award 1 bonus point (making total score to 5) if the reply has step-by-step correct explanation of how the final answer is derived.
 
 Provide your feedback as follows:
 
 Feedback:::
-Evaluation: (your extremely concise rationale for the rating, as a text)
+Evaluation: (your rationale for the rating, as a text)
 Total rating: (your rating, as a number between 1 and 5)
 
 You MUST provide values for 'Evaluation:' and 'Total rating:' in your answer.
@@ -56,7 +56,7 @@ Now here are the question and answer.
 
 {ref_answer}
 
-Provide your concise feedback. Try your best to give a correct rating.
+Provide your feedback. Try your best to give a correct rating.
 Feedback:::
 '''
 
