@@ -7,7 +7,7 @@
 
 import json
 import os
-# os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['HF_HUB_OFFLINE'] = '1'
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -31,7 +31,7 @@ import random
 from mlx.utils import tree_flatten, tree_unflatten, tree_map
 from mlx_lm import batch_generate, generate, load, convert
 from mlx_lm.utils import load_model, save_model, dequantize_model
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_sampler, make_logits_processors
 # from data.grpo.salseforce_tool import salesfores_toolcall
 
 from data.grpo.websearch_tool import tool_calling_traces
@@ -62,11 +62,11 @@ class TrainConfig:
     GEN_LEN = 256 + 128
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 1e-5
     WEIGHT_DECAY = 0
-    EPSILON_MIN = 3e-2   # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
-    EPSILON_HIGH = 4e-2   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
-    GROUP_SIZE = 6
+    EPSILON_MIN = 3e-3   # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
+    EPSILON_HIGH = 4e-3   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
+    GROUP_SIZE = 8
     WARMUP_STEPS = 50 # 50
     DECAY_STEPS = 40 # 10
     BETA = 0 # 0.04
@@ -77,9 +77,9 @@ class TrainConfig:
     GRAD_NORM = 1
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
-    SAVE_PATH = "weights/NanoAgent-135M-grpo-math"
+    SAVE_PATH = "weights/NanoAgent-135M-custom-grpo-math"
     DATA_PATH = "data/datasets/grpo_mix.pickle"
-    MODEL = ["quwsarohi/NanoAgent-135M", "weights/NanoAgent-135M-core"][-1]
+    MODEL = "quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
@@ -87,20 +87,20 @@ class TrainConfig:
     TQDM = True
     STD_NORM = False
     CONST_TOK_SCALE = False
-    SAMPLING = "sequence"
+    SAMPLING = 'custom' #'sequence'
     SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE = 0.9 # Better to keep <= 0.9
+    TEMPERATURE = 0.8 # Better to keep <= 0.9
     MIN_P = None # Expected ~0.2 for Smollm2-135M
     TOP_K = None
-    TOP_P = 0.9 # Important: Only ~ 0.95 gave increasing reward for Smollm2-135M
+    TOP_P = 0.9
 
 # GSPO Constraints:
 # -----------------
 # STD_NORM = True
 # CONST_TOK_SCALE = False
 # SOFT_CLIP = False
-# EPSILON_MIN = 3e-2  # Sequence/GSPO: 3e-4
-# EPSILON_HIGH = 4e-2 # Sequence/GSPO: 4e-4
+# EPSILON_MIN = 3e-3  (minimum value that updates logprob) # Sequence/GSPO: 3e-4
+# EPSILON_HIGH = 4e-3 (minimum value that updates logprob) # Sequence/GSPO: 4e-4
 # SAMPLING = "sequence"
 
 # DR GRPO Constraints:
@@ -125,7 +125,7 @@ class TrainConfig:
 # Token Sampling: DAPO - https://arxiv.org/pdf/2503.14476
 # Sequence Sampling: GSPO - https://arxiv.org/pdf/2507.18071
 
-assert TrainConfig.SAMPLING in ['token', 'sequence']
+assert TrainConfig.SAMPLING in ['token', 'sequence', 'custom']
 assert 0 <= TrainConfig.UPDATE_WEIGHT
 assert 0 < TrainConfig.GRAD_NORM or TrainConfig.GRAD_NORM is not None
 assert 1 <= TrainConfig.GRAD_ACCUM
@@ -340,7 +340,7 @@ def evaluate(eval_model, runs=4, temp=0.):
                 max_tokens=TrainConfig.GEN_LEN,
                 sampler=None if temp == 0 else lambda x: mx.random.categorical(x / temp, axis=-1)
             )
-            rewards.append(scorer(response))
+            rewards.append(scorer(response, False))
     return rewards
 
 
@@ -398,21 +398,14 @@ def prog_graph(
     axes[1].grid(True)
     axes[1].set_ylim(bottom=0)
 
-    itrs = [x[0]['iter'] for x in eval_rewards]
-    eval_greedy = []
-    eval_sampling = []
-    for elem in eval_rewards:
-        for e in elem:
-            if e['temperature'] == 0:
-                eval_greedy.append(e['eval_score'])
-            else:
-                eval_sampling.append(e['eval_score'])
+    itrs = [x['iter'] for x in eval_rewards]
+    eval_greedy = [e['eval_score'] for e in eval_rewards]
 
     axes[2].scatter(itrs, eval_greedy, color="tab:green", linewidth=2, marker="*")
     axes[2].plot(itrs, eval_greedy, color="tab:green", linewidth=2)
 
-    axes[2].scatter(itrs, eval_sampling, color="tab:green", linewidth=2, marker="x")
-    axes[2].plot(itrs, eval_sampling, color="tab:green", alpha=0.6, linestyle='--', linewidth=2)
+    # axes[2].scatter(itrs, eval_sampling, color="tab:green", linewidth=2, marker="x")
+    # axes[2].plot(itrs, eval_sampling, color="tab:green", alpha=0.6, linestyle='--', linewidth=2)
 
     axes[2].set_title("Eval Rewards")
     axes[2].grid(True)
@@ -521,8 +514,10 @@ def save_state(
         )
     save_model(save_path=path, model=dequantize_model(deepcopy(model)))
 
-    if max(eval_rewards) == eval_rewards[-1]:
+    all_eval_rewards = [x['eval_score'] for x in eval_rewards]
+    if max(all_eval_rewards) == all_eval_rewards[-1]:
         save_model(save_path=os.path.join(path, 'best_weight'), model=dequantize_model(deepcopy(model)))
+        print("\nBest model saved", flush=True)
 
     train_info = {
         "training_params": {
@@ -616,7 +611,9 @@ def grpo_loss_fn(
     # Get log probs from the trainable model (π_θ)
     log_probs, pad_mask = calculate_log_probs(model, io_toks, a_toks, pad_tok_id)
     # Get log probs from the old non-trainable model (π_θ_old)
-    if model_old is not None:
+    if TrainConfig.SAMPLING == 'custom':
+        old_log_probs = None
+    elif model_old is not None:
         old_log_probs, old_pad_mask = calculate_log_probs(
             model_old, io_toks, a_toks, tokenizer.pad_token_id
         )
@@ -655,6 +652,11 @@ def grpo_loss_fn(
         else:
             token_policy_reward = soft_gate(ratio, advantages) * advantages * pad_mask
         # token_policy_reward.shape: (G, n_tokens)
+    elif TrainConfig.SAMPLING == 'custom':
+        # Sequence level reward
+        # token_policy_reward = advantages * (log_probs * pad_mask).sum(axis=-1)
+        # Token level reward
+        token_policy_reward = advantages * ((log_probs * pad_mask).sum(axis=-1) / pad_mask.sum(axis=-1))
     else:
         NotImplementedError
 
@@ -724,6 +726,11 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         min_p=TrainConfig.MIN_P if TrainConfig.MIN_P else 0,
         top_k=TrainConfig.TOP_K if TrainConfig.TOP_K else 0
     )
+
+    logits_processors = make_logits_processors(
+        repetition_penalty=1.1,
+        repetition_context_size=TrainConfig.GEN_LEN
+    )
     
     rollout_tokens, rollout_rewards, rollout_a_toks = [], [], []
     model.eval()
@@ -736,7 +743,8 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
             prompt_tokens,
             max_tokens=TrainConfig.GEN_LEN,
             # Hack: Add one greedy decoding
-            sampler=sampler if gitr != 0 else None
+            sampler=sampler if gitr != 0 else None,
+            logits_processors=logits_processors
         )
 
         response_tokens = tokenizer.encode(response, add_special_tokens=False)
@@ -744,7 +752,7 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         if len(response_tokens) >= TrainConfig.GEN_LEN - 1:
             continue
 
-        reward = float(scorer(response))
+        reward = float(scorer(response, True))
         rollout_tokens.append(mx.array(prompt_tokens + response_tokens))
         rollout_rewards.append(reward)
         rollout_a_toks.append(mx.array(response_tokens))
@@ -806,25 +814,50 @@ def grpo_train_loop(
         initial=prev_iters,
         )
 
+    # Skipped tracks when if a particular batch was skipped due to 0 std rewards
+    # It avoids saving checkpoints + doing evals multiple times
     skipped = False
     while len(losses) < TrainConfig.ITERS:
         # Evaluation
         if len(losses) % TrainConfig.EVAL_STEPS == 0 and not skipped:
-            # eval_sampling = evaluate(model, runs=2, temp=0.3)
             eval_greedy = evaluate(model, runs=1, temp=0)
-            eval_sampling = eval_greedy
-            eval_rewards.append([
-                {
-                    'iter': len(losses),
-                    'temperature': 0,
-                    'eval_score': sum(eval_greedy)/len(eval_greedy)
-                },
-                {
-                    'iter': len(losses),
-                    'temperature': 0.1,
-                    'eval_score': sum(eval_sampling)/len(eval_sampling)
-                }
-            ])
+            eval_rewards.append({
+                'iter': len(losses),
+                'temperature': 0,
+                'eval_score': sum(eval_greedy)/len(eval_greedy)
+            })
+        
+            # if max([er['eval_score'] for er in eval_rewards]) != eval_rewards[-1]['eval_score']:
+            #     del model
+            #     mx.clear_cache()
+            #     (
+            #         model,
+            #         optimizer,
+            #         iter_step,
+            #         losses,
+            #         learning_rates,
+            #         all_rewards,
+            #         max_rewards,
+            #         std_rewards,
+            #         eval_rewards
+            #     ) = load_state(TrainConfig.SAVE_PATH)
+            #     print("Best model checkpoints restored")
+            #     skipped = True
+        
+        # Save checkpoint
+        if len(losses) % TrainConfig.SAVE_FREQ == 0 and not skipped and len(losses) > 0:
+            save_state(
+                len(losses),
+                losses,
+                learning_rates,
+                all_rewards,
+                max_rewards,
+                std_rewards,
+                eval_rewards,
+                model,
+                optimizer,
+                path=TrainConfig.SAVE_PATH,
+            )
         
         skipped = True
         # 1. Sample a batch of prompts
@@ -917,7 +950,7 @@ def grpo_train_loop(
         if TrainConfig.TQDM:
             rwds = list(map(lambda x: round(x, 2), all_rewards[-3:]))
             pbar.set_description(
-                f"Loss: {tot_loss / (len(losses) + 1):.4f} | LR: {learning_rates[-1][-1]:1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max: {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1][0]['eval_score']:.2f} | Rewards: {rwds}"
+                f"Loss: {tot_loss / (len(losses) + 1):.4f} | LR: {learning_rates[-1][-1]:1.6f} | MA Score: {sum(all_rewards)/len(all_rewards):.2f} | Max: {sum(max_rewards) / len(max_rewards):.2f} | Eval: {eval_rewards[-1]['eval_score']:.2f} | Rewards: {rwds}"
             )
             pbar.update(TrainConfig.BATCH_SIZE)
         del grads, loss
@@ -939,21 +972,6 @@ def grpo_train_loop(
             mx.eval(model_ref.state)
             model_ref.eval().freeze()
             print(f"\nIter {len(losses)+1}: Synced ref model weights.")
-
-
-        if len(losses) % TrainConfig.SAVE_FREQ == 0:
-            save_state(
-                len(losses),
-                losses,
-                learning_rates,
-                all_rewards,
-                max_rewards,
-                std_rewards,
-                eval_rewards,
-                model,
-                optimizer,
-                path=TrainConfig.SAVE_PATH,
-            )
 
         if len(losses) % 5 == 0:
             prog_graph(
