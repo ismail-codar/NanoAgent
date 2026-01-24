@@ -77,7 +77,7 @@ class TrainConfig:
     GRAD_NORM = 1
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
-    SAVE_PATH = "weights/NanoAgent-135M-custom-grpo-math"
+    SAVE_PATH = "weights/NanoAgent-135M-grpo-math"
     DATA_PATH = "data/datasets/grpo_mix.pickle"
     MODEL = "quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
@@ -93,6 +93,7 @@ class TrainConfig:
     MIN_P = None # Expected ~0.2 for Smollm2-135M
     TOP_K = None
     TOP_P = 0.9
+    REPETITION_PENALTY = 1.1 # ~1.1
 
 # GSPO Constraints:
 # -----------------
@@ -234,30 +235,35 @@ scheduler = linear_decay_with_warmup(
 )
 
 
-# scheduler_muon = linear_decay_with_warmup(
-#     base_lr=TrainConfig.LEARNING_RATE, #0.001, 0.01, 0.02, 1e-3,
-#     total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
-#     warmup_steps=TrainConfig.WARMUP_STEPS,
-#     decay_steps=TrainConfig.DECAY_STEPS
-# )
-
-optimizer = optim.AdamW(
-    learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+scheduler_muon = linear_decay_with_warmup(
+    base_lr=TrainConfig.LEARNING_RATE*10, #0.001, 0.01, 0.02, 1e-3,
+    total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
+    warmup_steps=TrainConfig.WARMUP_STEPS,
+    decay_steps=TrainConfig.DECAY_STEPS
 )
+
+# optimizer = optim.AdamW(
+#     learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+# )
 
 # Interesting writings:
 # * https://www.lakernewhouse.com/writing/muon-2
 # * https://kellerjordan.github.io/posts/muon/
 # * https://varunneal.github.io/essays/muon
 # * https://github.com/KellerJordan/Muon
-# optimizer = [
-#     optim.AdamW(
-#         learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY
-#     ),
-#     optim.Muon(
-#         learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
-#     )
-# ]
+
+optimizer = optim.MultiOptimizer(
+    [        
+        optim.Muon(
+            learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
+        ),
+        optim.AdamW(
+            learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+        )
+    ],
+    # Where muon will be applied
+    [lambda name, weight: weight.ndim == 2 and 'embed_tokens' not in name]
+)
 
 def total_tokens(data):
     return len(
@@ -727,10 +733,13 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         top_k=TrainConfig.TOP_K if TrainConfig.TOP_K else 0
     )
 
-    logits_processors = make_logits_processors(
-        repetition_penalty=1.1,
-        repetition_context_size=TrainConfig.GEN_LEN
-    )
+    if TrainConfig.REPETITION_PENALTY and TrainConfig.REPETITION_PENALTY != 1:
+        logits_processors = make_logits_processors(
+            repetition_penalty=TrainConfig.REPETITION_PENALTY,
+            repetition_context_size=TrainConfig.GEN_LEN
+        )
+    else:
+        logits_processors = None
     
     rollout_tokens, rollout_rewards, rollout_a_toks = [], [], []
     model.eval()
@@ -743,14 +752,15 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
             prompt_tokens,
             max_tokens=TrainConfig.GEN_LEN,
             # Hack: Add one greedy decoding
-            sampler=sampler if gitr != 0 else None,
-            logits_processors=logits_processors
+            sampler=sampler, #if gitr != 0 else None,
+            logits_processors=logits_processors #if gitr != 0 else None
         )
 
         response_tokens = tokenizer.encode(response, add_special_tokens=False)
         # Avoiding truncated answers
         if len(response_tokens) >= TrainConfig.GEN_LEN - 1:
             continue
+        response_tokens.append(tokenizer.eos_token_id)
 
         reward = float(scorer(response, True))
         rollout_tokens.append(mx.array(prompt_tokens + response_tokens))
@@ -1000,11 +1010,14 @@ mx.eval(model)
 # params = tree_flatten(model.parameters())
 # freeze_keys = []
 # for key, value in params:
+    # print(key, value.ndim)
 #     special_layers = ['embed', 'embed_tokens', 'lm_head', 'softmax', 'output', 'classifier']
 #     if any(k in key for k in special_layers) or (value.ndim < 1):
 #         print(key)
 #         freeze_keys.append(key)
 # model.freeze(recurse=True, keys=freeze_keys)
+
+# sys.exit()
 
 # special_layers = ['embed', 'embed_tokens', 'lm_head', 'softmax', 'output', 'classifier']
 if TrainConfig.FREEZE_LAYERS:
