@@ -286,7 +286,7 @@ def is_think(inp_str):
     """
     pattern = re.compile(r'^<think>[\s\S]*?</think>[\s\S]*?$')
     try:
-        return bool(pattern.fullmatch(inp_str))
+        return bool(pattern.fullmatch(inp_str)) and (inp_str.count("<think>") == inp_str.count("</think>") == 1)
     except Exception:
         # print(f"KeyError: 'messages' or 'content' not found in element")
         return False

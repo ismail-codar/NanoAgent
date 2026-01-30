@@ -40,6 +40,7 @@ from data.grpo.autoif import autoif_ds
 from data.grpo.ifeval import ifeval_ds
 # from data.grpo.gorilla_tool import gorilla_openfun
 from data.grpo.reasoning_gym import *
+from data.grpo.general_chat import general_chat_ds
 
 from scipy.ndimage import gaussian_filter1d
 from utils.utils import grad_checkpoint, split_grads
@@ -56,7 +57,7 @@ from utils.webtool import tool_call_extract
 @dataclass
 class TrainConfig:
     # Iterations
-    ITERS = 1000 #3_000
+    ITERS = 3_000
     GENERATE_DATA = False
     BATCH_SIZE = 1
     GEN_LEN = 256 + 128
@@ -78,12 +79,12 @@ class TrainConfig:
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
     SAVE_PATH = "weights/NanoAgent-135M-grpo-math"
-    DATA_PATH = "data/datasets/grpo_mix.pickle"
-    MODEL = "quwsarohi/NanoAgent-135M"
+    DATA_PATH = "data/datasets/grpo_math.pickle"
+    MODEL = "quwsarohi/NanoAgent-135M" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
-    EVAL_SAMPLES = 75
+    EVAL_SAMPLES = 100
     TQDM = True
     STD_NORM = False
     CONST_TOK_SCALE = False
@@ -207,17 +208,22 @@ def linear_decay_with_warmup(
     warmup_steps: int,
     decay_steps: int,
 ):
-    assert total_steps - warmup_steps - decay_steps > 0
+    assert total_steps > warmup_steps + decay_steps
     def schedule(step):
-        # Linear warmup
+        # Linear warmup: 0 → base_lr
         warmup_lr = base_lr * step / warmup_steps
-        # Linear decay
-        decay_lr = base_lr * (step - (total_steps - decay_steps)) / decay_steps
+        # Linear decay: base_lr → 0
+        decay_progress = (step - (total_steps - decay_steps)) / decay_steps
+        decay_lr = base_lr * (1.0 - decay_progress)
         return mx.where(
             step < warmup_steps,
             warmup_lr,
-            mx.where(step >= (total_steps - decay_steps), decay_lr, base_lr))
-
+            mx.where(
+                step >= (total_steps - decay_steps),
+                mx.maximum(decay_lr, 0.0),
+                base_lr
+            )
+        )
     return schedule
 
 
@@ -234,9 +240,8 @@ scheduler = linear_decay_with_warmup(
     decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
 )
 
-
 scheduler_muon = linear_decay_with_warmup(
-    base_lr=TrainConfig.LEARNING_RATE*10, #0.001, 0.01, 0.02, 1e-3,
+    base_lr=TrainConfig.LEARNING_RATE * 10, #0.001, 0.01, 0.02, 1e-3,
     total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
     warmup_steps=TrainConfig.WARMUP_STEPS,
     decay_steps=TrainConfig.DECAY_STEPS
@@ -283,11 +288,17 @@ if TrainConfig.GENERATE_DATA:
     train_ds = []
 
     # --- IF Eval ---
-    # sz = int(ds_size * 0.35)
-    # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN)
-    # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)[:sz]
-    # sz = int(ds_size * 0.65)
-    # train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, 2, kshot=True)[:sz]
+    # sz = int(ds_size * 0.4)
+    # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
+    # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
+    # sz = int(ds_size * 1)
+    # train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
+    # sz = int(ds_size * 0.4)
+    # random.shuffle(train_ds)
+    # train_ds = train_ds[:sz]
+    # print("IF-Eval DS size:", len(train_ds))
+
+    # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
     
     # --- Tool Call ---
     # sz = int(ds_size * 0.5)
@@ -505,7 +516,8 @@ def save_state(
 ):
     # Save optimizer the state
     # https://ml-explore.github.io/mlx/build/html/python/optimizers.html
-    
+    if not os.path.exists(path):
+        os.makedirs(path)
 
     if isinstance(optimizer, list):
         mx.eval(model.state, optimizer[0].state, optimizer[1].state)
@@ -519,11 +531,6 @@ def save_state(
             os.path.join(path, "optimizer.safetensors"), dict(tree_flatten(optimizer.state))
         )
     save_model(save_path=path, model=dequantize_model(deepcopy(model)))
-
-    all_eval_rewards = [x['eval_score'] for x in eval_rewards]
-    if max(all_eval_rewards) == all_eval_rewards[-1]:
-        save_model(save_path=os.path.join(path, 'best_weight'), model=dequantize_model(deepcopy(model)))
-        print("\nBest model saved", flush=True)
 
     train_info = {
         "training_params": {
@@ -696,6 +703,8 @@ def grpo_loss_fn(
         # loss = -1 * ((token_policy_reward.sum() / total_tokens).sum()
         # DR GRPO
         loss = -1 * ((token_policy_reward.sum(axis=-1) / total_tokens)).sum()
+    # elif TrainConfig.SAMPLING == 'custom':
+    #     loss = -1 * token_policy_reward.sum()
     else:
         loss = -1 * (token_policy_reward.sum() / n_groups)
     return loss
@@ -723,8 +732,18 @@ def pad_sequences(sequences, pad_token_id):
     return mx.stack(padded_sequences)
 
 
+def min_max_norm(vals):
+    mn = min(vals)
+    mx = max(vals)
+    new_vals = [((x - mn) / (mx-mn)) if (mx-mn) != 0 else (x - mn) for x in vals]
+    return new_vals
+
 # @partial(mx.compile) #inputs=mx.random.state, outputs=mx.random.state)
 def rollout_batch(prompt, scorer, tokenizer, model, group_size):
+    # Ideas:
+    # Implement soft-length based reward in each group of generation
+    # Implement group based score normalization
+
     prompt_tokens = tokenizer.encode(prompt)
     sampler = make_sampler(
         temp=TrainConfig.TEMPERATURE,
@@ -759,14 +778,25 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         response_tokens = tokenizer.encode(response, add_special_tokens=False)
         # Avoiding truncated answers
         if len(response_tokens) >= TrainConfig.GEN_LEN - 1:
-            continue
-        response_tokens.append(tokenizer.eos_token_id)
-
-        reward = float(scorer(response, True))
+            reward = -1
+            # continue
+        else:
+            reward = float(scorer(response, False))
+            response_tokens.append(tokenizer.eos_token_id)
+        
         rollout_tokens.append(mx.array(prompt_tokens + response_tokens))
         rollout_rewards.append(reward)
         rollout_a_toks.append(mx.array(response_tokens))
 
+    # Length based reward
+    n_tokens = [len(toks) for toks in rollout_a_toks]
+    max_tokens = max(n_tokens)
+    for idx in range(len(rollout_rewards)):
+        if rollout_rewards[idx] <= 0: continue
+        len_norm = n_tokens[idx] / max_tokens
+        rollout_rewards[idx] = 0.9 * rollout_rewards[idx] + 0.1 * len_norm
+
+    # rollout_rewards = min_max_norm(rollout_rewards)
     if rollout_rewards:
         rrewards = mx.array(rollout_rewards)
         mean_reward = mx.mean(rrewards)
@@ -836,7 +866,24 @@ def grpo_train_loop(
                 'temperature': 0,
                 'eval_score': sum(eval_greedy)/len(eval_greedy)
             })
-        
+
+            # Saving when this is the best checkpoint
+            all_eval_rewards = [x['eval_score'] for x in eval_rewards]
+            if max(all_eval_rewards) == all_eval_rewards[-1]:
+                save_state(
+                    len(losses),
+                    losses,
+                    learning_rates,
+                    all_rewards,
+                    max_rewards,
+                    std_rewards,
+                    eval_rewards,
+                    model,
+                    optimizer,
+                    path=os.path.join(TrainConfig.SAVE_PATH, 'best_checkpoint'),
+                )
+
+            # Restart of not the best checkpint
             # if max([er['eval_score'] for er in eval_rewards]) != eval_rewards[-1]['eval_score']:
             #     del model
             #     mx.clear_cache()
@@ -997,8 +1044,19 @@ def grpo_train_loop(
             mx.clear_cache()
 
     # Final save of adapter weights
-    model.save_weights("adapters.safetensors")
-    print("Saved final weights to adapters/adapters.safetensors.")
+    save_state(
+        len(losses),
+        losses,
+        learning_rates,
+        all_rewards,
+        max_rewards,
+        std_rewards,
+        eval_rewards,
+        model,
+        optimizer,
+        path=os.path.join(TrainConfig.SAVE_PATH, 'final_checkpoint'),
+    )
+
     return losses, all_rewards, max_rewards
 
 

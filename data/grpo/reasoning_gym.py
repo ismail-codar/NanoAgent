@@ -217,8 +217,8 @@ def syllogism_parser(llm_gen, llm_judge, entry, score_fn, think):
     if answer in words:
         p = words.index(answer)
         score = 1 / len(words[p:])**2
-    first_word = word_parser(llm_gen)
-    if first_word and answer == first_word[0]:
+    first_word = word_parser(llm_gen)[0]
+    if answer == first_word:
         score = max(score, 1.0)
 
     if score > 0 and llm_judge:

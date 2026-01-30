@@ -33,7 +33,7 @@ def scorer(response, llm_judge, eval_func, question):
     return final_result
 
 
-def autoif_ds(tokenizer, prompt_token_len):
+def autoif_ds(tokenizer, prompt_token_len, n_instructions=None):
     dataset = load_dataset("Post-training-Data-Flywheel/AutoIF-instruct-61k-with-funcs")['train']
     dataset = dataset.map(lambda x: {'eval_funcs': list(set(x['eval_funcs']))})
     dataset = dataset.map(lambda x: {
@@ -45,6 +45,8 @@ def autoif_ds(tokenizer, prompt_token_len):
     )})
     dataset = dataset.remove_columns(['system', 'tools', 'conversation_id'])
     dataset = [d for d in dataset]
+    if n_instructions:
+        dataset = list(filter(lambda d: len(set(d['eval_funcs'])) <= n_instructions, dataset))
     for i in range(len(dataset)):
         dataset[i]['scorer'] = partial(scorer, eval_func=dataset[i]['eval_funcs'], question=dataset[i]['messages'][-1]['content'])
     dataset = list(filter(lambda x: len(tokenizer.encode(x['prompt'])) <= prompt_token_len, dataset))

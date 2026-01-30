@@ -31,13 +31,13 @@ class TrainConfig:
     VERSION = "instruct"
     TRAIN_TYPE = "sft"
     # Iterations
-    EPOCHS = 2.1
+    EPOCHS = 1.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
-    LOAD_PREV = True
+    LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 75000)
+    WARMUP_STEPS = int(0.1 * 55848)
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -49,7 +49,7 @@ class TrainConfig:
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 1
     TRAIN_LABEL = ("c" if VERSION == "instruct" else "") + TRAIN_TYPE
-    SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v12"
+    SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v13"
 
 
 config_dict = {
@@ -275,12 +275,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files="data/datasets/Smollm2_base_train_v12.jsonl",
+    data_files="data/datasets/Smollm2_base_train_v13.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files="data/datasets/Smollm2_base_test_v12.jsonl",
+    data_files="data/datasets/Smollm2_base_test_v13.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -330,19 +330,39 @@ def cosine_decay_with_warmup(
     return schedule
 
 
-scheduler = cosine_decay_with_warmup(
+scheduler_adam = cosine_decay_with_warmup(
     max_lr=TrainConfig.MAX_LEARNING_RATE,
     min_lr=TrainConfig.MIN_LEARNING_RATE,
     total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
     warmup_steps=TrainConfig.WARMUP_STEPS,
 )
 
-optimizer = optim.AdamW(
-    learning_rate=scheduler,
-    weight_decay=TrainConfig.WEIGHT_DECAY,
-    # betas=[0.9, 0.95],
-    # SQRT Scaling: bi = 1 - scale_val * (1 - bi)
-    betas=[0.9, 0.99],
+scheduler_muon = cosine_decay_with_warmup(
+    max_lr=TrainConfig.MAX_LEARNING_RATE * 10,
+    min_lr=TrainConfig.MIN_LEARNING_RATE,
+    total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
+    warmup_steps=TrainConfig.WARMUP_STEPS,
+)
+
+# optimizer = optim.AdamW(
+#     learning_rate=scheduler,
+#     weight_decay=TrainConfig.WEIGHT_DECAY,
+#     # betas=[0.9, 0.95],
+#     # SQRT Scaling: bi = 1 - scale_val * (1 - bi)
+#     betas=[0.9, 0.99],
+# )
+
+optimizer = optim.MultiOptimizer(
+    [        
+        optim.Muon(
+            learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
+        ),
+        optim.AdamW(
+            learning_rate=scheduler_adam, betas=[0.9, 0.99], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+        )
+    ],
+    # Where muon will be applied
+    [lambda name, weight: weight.ndim == 2 and 'embed_tokens' not in name]
 )
 
 
@@ -437,6 +457,7 @@ seen_tokens = 0
 log_steps = 1
 eval_loss = defaultdict(float)
 if TrainConfig.LOAD_PREV:
+    del model
     model, optimizer, itr_start, losses, eval_losses, seen_tokens = load_state()
 win_loss = sum(losses)
 # nn.quantize(model)
