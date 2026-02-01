@@ -70,14 +70,14 @@ class TrainConfig:
     GROUP_SIZE = 8
     WARMUP_STEPS = 50 # 50
     DECAY_STEPS = 40 # 10
-    BETA = 0 # 0.04
+    BETA = 0.04 # 0.04
     EVAL_STEPS = 50
     NUM_MODEL_UPDATE_MU = 1   # Number of backpropagations per question/rollout
     GRAD_ACCUM = 1
     GRAD_NORM = 1
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
-    SAVE_PATH = "weights/NanoAgent-135M-grpo-math"
+    SAVE_PATH = "weights/NanoAgent-135M-grpo-ifeval"
     DATA_PATH = "data/datasets/grpo_math.pickle"
     MODEL = "quwsarohi/NanoAgent-135M" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
