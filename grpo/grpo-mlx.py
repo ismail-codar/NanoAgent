@@ -639,7 +639,7 @@ def grpo_loss_fn(
         if TrainConfig.SAMPLING == 'token':
             token_policy_reward = token_policy_reward - beta * kl_div
         else:
-            kl_div = kl_div.sum(axis=-1)
+            kl_div = kl_div.sum(axis=-1) / pad_mask.sum(axis=-1)
             token_policy_reward = token_policy_reward - beta * kl_div
 
     # The objective is to maximize this, so we return the negative for minimization
