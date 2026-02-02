@@ -436,43 +436,40 @@ def filter_non_english(text: str) -> bool:
 
 
 def pack_data(
-    dataset, ctx_len=1024, return_list=False, bucket_size=256, sort=False, report=True
+    dataset, ctx_len=1024, return_list=False, segment_size=256, sort=False, report=True
 ):
     from datasets import Dataset
     new_dataset = []
-    ctx_bucket = [set() for _ in range(bucket_size)]
-    prev_data_len = len(dataset)
-    assert bucket_size > 1
+    tot_buckets = (ctx_len // segment_size) + 2
+    ctx_bucket = [set() for _ in range(tot_buckets)]
+    assert segment_size > 1
 
     if sort:
         dataset = dataset.sort("ctx_len")
 
     for idx, data in enumerate(dataset):
         prev_loc_found = False
-        for bidx in range(bucket_size):
-            min_rem_ctx_len = bidx * bucket_size
-            # max_rem_ctx_len = (bidx + 1) * bucket_size
-            if min_rem_ctx_len > data["ctx_len"] and ctx_bucket[bidx]:
-                # data_idx = -1
-                # for e in ctx_bucket[bidx]:
-                #     if new_dataset[e]['ctx_len'] + data['ctx_len'] <= ctx_len:
-                #         data_idx = e
-                #         break
-                # if data_idx == -1:
-                #     continue
-
+        # Iterate over bucket size
+        # Bucket 0 -> [0, segment_size)
+        # Bucket 1 -> [segment_size, 2*segment_size)
+        for bidx in range(tot_buckets):
+            # Bucket index indicates remaining ctx_len
+            min_rem_ctx_len = (bidx + 1) * segment_size
+            # If remaining_len is greater than the content ctx len and a content exists
+            # Truncation happens due to data["ctx_len"] // 2
+            if min_rem_ctx_len >= (data["ctx_len"] // 2) and ctx_bucket[bidx]:
+                # Add the content in the existing data
                 data_idx = next(iter(ctx_bucket[bidx]))
                 new_dataset[data_idx]["messages"].append(data["messages"])
                 new_dataset[data_idx]["source"].append(data["source"])
                 new_dataset[data_idx]["ctx_len"] += data["ctx_len"]
-
-                new_ctx_len = max(
-                    ctx_len - (data["ctx_len"] + new_dataset[data_idx]["ctx_len"]), 0
-                )
-                new_bidx = new_ctx_len % bucket_size
                 ctx_bucket[bidx].remove(data_idx)
-                ctx_bucket[new_bidx].add(data_idx)
                 prev_loc_found = True
+                # New remaining ctx_len
+                new_rem_ctx_len = max(ctx_len - new_dataset[data_idx]["ctx_len"], 0)
+                if new_rem_ctx_len < 16: break
+                new_bidx = (new_rem_ctx_len // segment_size) + 1
+                ctx_bucket[new_bidx].add(data_idx)
                 break
 
         if not prev_loc_found:
@@ -483,29 +480,25 @@ def pack_data(
                     "ctx_len": data["ctx_len"],
                 }
             )
-            rem_ctx = max(ctx_len - new_dataset[-1]["ctx_len"], 0) % bucket_size
-            ctx_bucket[rem_ctx].add(len(new_dataset) - 1)
+            rem_ctx_idx = (max(ctx_len - new_dataset[-1]["ctx_len"], 0) // segment_size) + 1
+            ctx_bucket[rem_ctx_idx].add(len(new_dataset) - 1)
 
     if report:
         # new_dataset = pack_data(new_dataset, ctx_len, sort=True, report=False)
         NON_PAD_TOKS = 0
         TRUNCATED_TOKS = 0
-        for idx, data in enumerate(new_dataset):
-            # assert data['ctx_len'] <= ctx_len, f"Data idx: {idx} = {data['ctx_len']} > {ctx_len}"
-            if data["ctx_len"] > ctx_len:
-                TRUNCATED_TOKS += data["ctx_len"] - ctx_len
-            NON_PAD_TOKS += data["ctx_len"]
+        PAD_TOKS = 0
         TOT_TOKS = len(new_dataset) * ctx_len
-        PAD_TOKS = TOT_TOKS - NON_PAD_TOKS
-        print("Total tokens:        ", TOT_TOKS)
-        print(
-            "Total non-pad tokens:",
-            NON_PAD_TOKS,
-            f"({(PAD_TOKS / TOT_TOKS) * 100:2.2f}% padding)",
-        )
-        print(
-            f"Total truncated tokens: {TRUNCATED_TOKS} ({TRUNCATED_TOKS / TOT_TOKS * 100:2.2f}%)"
-        )
+
+        for idx, data in enumerate(new_dataset):
+            TRUNCATED_TOKS += max(data["ctx_len"] - ctx_len, 0)
+            NON_PAD_TOKS += data["ctx_len"]
+            PAD_TOKS += max(ctx_len - data['ctx_len'], 0)
+
+        print("Total tokens:          : ", TOT_TOKS)
+        print("Total non-pad tokens   : ", NON_PAD_TOKS)
+        print("Total pad tokens       : ", PAD_TOKS, f"({(PAD_TOKS / TOT_TOKS) * 100:2.2f}% of total tokens)")
+        print(f"Total truncated tokens :  {TRUNCATED_TOKS} ({TRUNCATED_TOKS / TOT_TOKS * 100:2.2f}% of total tokens)")
 
     if return_list:
         return new_dataset

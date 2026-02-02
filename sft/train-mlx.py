@@ -5,6 +5,8 @@
 
 import json
 import os, sys
+os.environ['HF_HUB_OFFLINE'] = '1'
+
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -27,17 +29,15 @@ from utils.utils import grad_checkpoint
 @dataclass
 class TrainConfig:
     # Base model config
-    SIZE = "360M"
-    VERSION = "instruct"
-    TRAIN_TYPE = "sft"
+    MODEL = "quwsarohi/NanoAgent-135M"
     # Iterations
-    EPOCHS = 1.1
+    EPOCHS = 2.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
     LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 55848)
+    WARMUP_STEPS = int(0.1 * 15000) # 101453
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -47,9 +47,8 @@ class TrainConfig:
     MAX_LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 0.1
     QUANTIZATION = None
-    GRADIENT_CHECKPOINT_LAYERS = 1
-    TRAIN_LABEL = ("c" if VERSION == "instruct" else "") + TRAIN_TYPE
-    SAVE_PATH = f"weights/SmolLM2-{SIZE}-mlx-{TRAIN_LABEL}-v13"
+    GRADIENT_CHECKPOINT_LAYERS = None
+    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-v13"
 
 
 config_dict = {
@@ -58,16 +57,16 @@ config_dict = {
     if not k.startswith("__") and not callable(v)
 }
 print(json.dumps(config_dict, indent=2))
-assert TrainConfig.TRAIN_TYPE in ["sft", "dft"]
 
-# Use if model is not present
-# hf_path = f"HuggingFaceTB/SmolLM2-{TrainConfig.SIZE}-Instruct"
-# convert(hf_path=hf_path, mlx_path=f'weights/SmolLM2-{TrainConfig.SIZE}-mlx-instruct')
-# sys.exit()
+cache_mlx_path = os.path.join('weights', TrainConfig.MODEL.split('/')[-1])
+if not os.path.exists(cache_mlx_path):
+    print('Downloading model and creating mlx model cache at:', cache_mlx_path)
+    convert(TrainConfig.MODEL, mlx_path=cache_mlx_path, q_bits=TrainConfig.QUANTIZATION)
+    print("Restart training")
+    sys.exit()
 
-model_path = f"weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}"
-model, tokenizer = load(model_path)
-print(f"Model path: weights/SmolLM2-{TrainConfig.SIZE}-mlx-{TrainConfig.VERSION}")
+print("Model loading from:", cache_mlx_path)
+model, tokenizer = load(cache_mlx_path)
 # model.generation_config.pad_token_id = tokenizer.pad_token_id
 # model.generation_config.eos_token_id = tokenizer.eos_token_id
 
@@ -76,7 +75,7 @@ if TrainConfig.QUANTIZATION is not None:
     nn.quantize(model, group_size=64, bits=TrainConfig.QUANTIZATION)
     print(f"Model quantized to {TrainConfig.QUANTIZATION} bits")
 model.train()
-tokenizer = get_tokenizer(f"HuggingFaceTB/SmolLM2-{TrainConfig.SIZE}", add_bos=False)
+tokenizer = get_tokenizer(TrainConfig.MODEL, add_bos=False)
 
 
 # Gradient checkpointing: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tuner/trainer.py
@@ -238,7 +237,7 @@ def source_dist(dataset):
     for k, v in SOURCE.items():
         print(k, ":", v, flush=True)
         pack_len += v
-    print(f"\nTotal data: {len(dataset)} (packed len: {pack_len})")
+    print(f"\nTotal data: {len(dataset)} (Unpacked len: {pack_len})")
     print("\n\n")
 
 
@@ -275,12 +274,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files="data/datasets/Smollm2_base_train_v13.jsonl",
+    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_v13.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files="data/datasets/Smollm2_base_test_v13.jsonl",
+    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_v13.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -338,7 +337,7 @@ scheduler_adam = cosine_decay_with_warmup(
 )
 
 scheduler_muon = cosine_decay_with_warmup(
-    max_lr=TrainConfig.MAX_LEARNING_RATE * 10,
+    max_lr=TrainConfig.MAX_LEARNING_RATE * 10 * 2,
     min_lr=TrainConfig.MIN_LEARNING_RATE,
     total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
     warmup_steps=TrainConfig.WARMUP_STEPS,
@@ -362,7 +361,7 @@ optimizer = optim.MultiOptimizer(
         )
     ],
     # Where muon will be applied
-    [lambda name, weight: weight.ndim == 2 and 'embed_tokens' not in name]
+    [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
 )
 
 
@@ -405,6 +404,8 @@ def save_state(
     seen_tokens,
     path=TrainConfig.SAVE_PATH,
 ):
+    if not os.path.exists(path):
+        os.makedirs(path)
     # Save optimizer the state
     # https://ml-explore.github.io/mlx/build/html/python/optimizers.html
     mx.eval(model.state, optimizer.state)
@@ -463,61 +464,18 @@ win_loss = sum(losses)
 # nn.quantize(model)
 
 
-def cal_loss(model, x, y, weights, evaluate=False):
-    # DFT ref: https://github.com/yongliang-wu/DFT/ | https://github.com/Lauorie/DFT
+# state = [model.state, optimizer.state]
+# @partial(mx.compile, inputs=state, outputs=state)
+def cal_loss(model, x, y, weights):
     logits = model(x)
-
-    ## Shape: (bs, ctx_len, voc_size)
-    # probs = mx.softmax(logits, axis=-1)
-    # probs_at_labels = mx.take_along_axis(
-    #     probs,
-    #     y[..., None],  # adds the indexing axis at end
-    #     axis=-1
-    # ).squeeze(-1)
-    ## print(y.shape)
-    ## Shape: (bs, ctx_len)
-    ## Enforcing to learn <|im_end|> to make sure LLM does not generate infinite tokens
-    # probs_at_labels = mx.where(y == tokenizer.eos_token_id, 1.0, probs_at_labels)
-    # probs_at_labels = mx.stop_gradient(probs_at_labels)
-    ## should increase the weight to 0.3
-    ## probs_at_labels_w = mx.maximum(probs_at_labels, 0.3)
-
     # Shape: (bs, ctx_len)
     tok_loss = nn.losses.cross_entropy(logits, y, reduction="none")
-
-    # Another implementation: memory and compute efficient
-    # Ref: https://github.com/yongliang-wu/DFT/issues/5
-    probs_at_labels = mx.exp(mx.stop_gradient(-tok_loss))
-    if not evaluate:
-        # probs_at_labels = mx.where(y == tokenizer.eos_token_id, 1.0, probs_at_labels)
-        # probs_at_labels = mx.maximum(probs_at_labels, 0.3)
-        # probs_at_labels = mx.clip(probs_at_labels + 0.3, a_min=0., a_max=1.0)
-        dft_weight = 1  # 0.7
-        probs_at_labels = probs_at_labels * dft_weight + (1 - dft_weight)
-
-    total_toks = mx.maximum(weights.sum(), 1e-7)
-    dft_loss_mean = (tok_loss * probs_at_labels * weights).sum() / total_toks
-
-    if not evaluate:
-        if TrainConfig.TRAIN_TYPE == "dft":
-            return dft_loss_mean
-        elif TrainConfig.TRAIN_TYPE == "sft":
-            ce_loss = (tok_loss * weights).sum() / total_toks
-            return ce_loss
-        else:
-            raise NotImplementedError
-    else:
-        ce_loss = (tok_loss * weights).sum() / total_toks
-        return {
-            "loss_dft": dft_loss_mean,
-            "prob_avg": (probs_at_labels * weights).sum() / total_toks,
-            "loss": ce_loss,
-        }
+    total_toks = mx.maximum(weights.sum(), 1e-12)
+    ce_loss = (tok_loss * weights).sum() / total_toks
+    return ce_loss
 
 
 state = [model.state, optimizer.state]
-
-
 @partial(mx.compile, inputs=state, outputs=state)
 def train_step(x, y, w):
     model.train()
@@ -530,21 +488,13 @@ def train_step(x, y, w):
 
 # @partial(mx.compile)
 def model_eval(tqdm_disable=False):
-    _eval_loss = defaultdict(int)
-    tot_tokens = 0
+    eval_loss = []
     model.eval()
     for eval_itr in tqdm(range(len(eval_dataset)), leave=False, disable=tqdm_disable):
-        x, y, w, ctx = get_batch(
-            eval_dataset, idx=eval_itr, batch_size=TrainConfig.BATCH_SIZE
-        )
-        toks = w.sum().item()
-        loss_dict = cal_loss(model, x, y, w, evaluate=True)
-        tot_tokens += toks
-        for k, v in loss_dict.items():
-            _eval_loss[k] += v.item() * toks
-    for k, v in _eval_loss.items():
-        _eval_loss[k] = v / max(tot_tokens, 1e-8)
-    return _eval_loss
+        x, y, w, ctx = get_batch(eval_dataset, idx=eval_itr, batch_size=TrainConfig.BATCH_SIZE)
+        # toks = w.sum().item()
+        eval_loss.append(cal_loss(model, x, y, w).item())
+    return sum(eval_loss) / len(eval_loss)
 
 
 tqdm_data = tqdm(
@@ -559,32 +509,33 @@ eval_loss = model_eval(False)
 if itr_start == 0:
     eval_losses[1] = {
         "train_loss": 0.0,
-        "eval_metric": eval_loss,
+        "eval_loss": eval_loss,
         "lr": optimizer.learning_rate.item(),
     }
 
 mx.eval(state)
+total_loss = sum(losses)
 for itr in tqdm_data:
     x, y, w, ctx = get_batch(
         dataset, idx=itr % len(dataset), batch_size=TrainConfig.BATCH_SIZE
     )
     toks = w.sum().item()
-    seen_tokens += toks
-    loss = train_step(x, y, w).item() * toks
+    loss = train_step(x, y, w).item()
+    non_pad_toks = mx.where(x != tokenizer.pad_token_id, 1, 0).sum().item()
     mx.eval(state)
     losses.append(loss)
-    win_loss += loss
+    total_loss += loss
+    seen_tokens += toks
 
     if (itr + 1) % log_steps == 0:
-        # KL {eval_loss['kl_diff']:1.4f}
         tqdm_data.set_description(
-            f"TL {win_loss / seen_tokens:1.4f}/ EL {eval_loss['loss']:1.4f}/ DFT {eval_loss['loss_dft']:1.4f}/ PA {eval_loss['prob_avg']:1.4f} / CTX {int(toks), w.shape[1], ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
+            f"TL {total_loss / (itr + 1):1.4f}/ EL {eval_loss:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
         )
         if (itr + 1) % 500 == 0:
             eval_loss = model_eval(False)
             eval_losses[itr + 1] = {
                 "train_loss": win_loss / seen_tokens,
-                "eval_metric": eval_loss,
+                "eval_loss": eval_loss,
                 "lr": optimizer.learning_rate.item(),
             }
             save_state(
@@ -600,4 +551,12 @@ for itr in tqdm_data:
                 flush=True,
             )
 
-save_model(save_path=TrainConfig.SAVE_PATH + "-trained", model=model)
+save_state(
+    iter_step=int(len(dataset) * TrainConfig.EPOCHS),
+    losses=losses,
+    eval_losses=eval_losses,
+    model=model,
+    optimizer=optimizer,
+    seen_tokens=seen_tokens,
+    path=os.path.join(TrainConfig.SAVE_PATH, 'final_checkpoint')
+)

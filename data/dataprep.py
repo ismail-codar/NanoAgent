@@ -5,7 +5,7 @@ from ast import literal_eval
 from collections import defaultdict
 from copy import deepcopy
 
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset, disable_caching
 from semhash import SemHash
 from utils.tokenizer import TOOL_TEMPLATE, get_tokenizer
 from utils.webtool import tool_parse
@@ -377,6 +377,142 @@ def codeact():
     return codeact_data
 
 
+def TxT360_efforts_if(reasoning='medium'):
+    def reason_fcall_map(data):
+        data = json.loads(data['messages'])
+        seq = []
+        for idx, turn in enumerate(data):
+            if turn["role"] == "assistant":
+                try:
+                    think = turn['think_fast']
+                    resp = turn['content']
+                    seq.append({
+                        'role': 'assistant',
+                        'content': f"<think>\n{think.strip()}\n</think>\n{resp}"
+                    })
+                except:
+                    return {
+                        "messages": [],
+                        "source": f"LLM360/TxT360-3efforts/instructions-with-constraints/{reasoning}",
+                    }
+
+            elif turn['role'] == 'system':
+                try:
+                    assert idx == 0
+                    seq.append({'role': turn['role'], 'content': turn['content'].strip() + ' ' + random.choice(THINK_STRINGS)})
+                except:
+                    return {
+                        "messages": [],
+                        "source": f"LLM360/TxT360-3efforts/instructions-with-constraints/{reasoning}",
+                    }
+
+            elif turn['role'] == 'user':
+                try:
+                    seq.append({'role': turn['role'], 'content': turn['content']})
+                except:
+                    return {
+                        "messages": [],
+                        "source": f"LLM360/TxT360-3efforts/instructions-with-constraints/{reasoning}",
+                    }
+        
+        if seq[0]['role'] != 'system':
+            seq = [{'role': 'system', 'content': 'You are a helpful AI assistant. ' + random.choice(THINK_STRINGS)}] + seq
+
+        return {
+            "messages": seq,
+            "source": f"LLM360/TxT360-3efforts/instructions-with-constraints/{reasoning}",
+        }
+
+    fc_dataset = load_dataset("LLM360/TxT360-3efforts", "instructions-with-constraints", split=reasoning)
+    fc_dataset = fc_dataset.map(reason_fcall_map)
+    fc_dataset = fc_dataset.filter(lambda x: len(x["messages"]) > 1)
+    # fc_dataset = fc_dataset.remove_columns(["conversations"])
+    return fc_dataset
+
+
+def TxT360_efforts_toolcall():
+    import ast
+    def reason_fcall_map(data):
+        data = json.loads(data['messages'])
+        seq = []
+        tool_def = None
+
+        for turn in data:
+            if turn["role"] == "system":
+                try:
+                    seq.append(
+                        {
+                            "role": "system",
+                            "content": TOOL_TEMPLATE.format(
+                                tools=tool_shuffle(turn['tools'])
+                            )
+                            + "\n"
+                            + random.choice(THINK_STRINGS),
+                        }
+                    )
+                    continue
+                except:
+                    return {
+                        "messages": [],
+                        "source": "LLM360/TxT360-3efforts/agent/medium",
+                    }
+
+            
+            if turn["role"] == "assistant":
+                think = turn.get('think_fast', '').strip()
+                think = f"\n{think}\n" if len(think) > 0 else "\n"
+                resp = turn.get('content', '')
+                tool_calls = []
+
+                for tc in turn.get('tool_calls', []):
+                    fname = tc['name']
+                    try:
+                        args = ast.literal_eval(tc['arguments']) #json.loads(tc['arguments'])
+                    except:
+                        try:
+                            args = json.loads(tc['arguments'])
+                        except:
+                            return {
+                                "messages": [],
+                                "source": "LLM360/TxT360-3efforts/agent/medium",
+                            }
+                    
+                    tool_calls.append({'name': fname, 'arguments': args})
+
+                if tool_calls:
+                    sanitized_tool_calls = json.dumps(tool_calls, indent=None)
+                    seq.append({
+                        'role': 'assistant',
+                        'content': f"<think>{think.strip()}</think>\n<tool_call>{sanitized_tool_calls}</tool_call>"
+                    })
+                else:
+                    seq.append({
+                        'role': 'assistant',
+                        'content': f"<think>{think.strip()}</think>\n{resp}"
+                    })
+            elif turn['role'] == 'user':
+                try:
+                    seq.append({'role': turn['role'], 'content': turn['content']})
+                except:
+                    return {
+                        "messages": [],
+                        "source": "LLM360/TxT360-3efforts/agent/medium",
+                    }
+
+        
+        return {
+            "messages": seq,
+            "source": "LLM360/TxT360-3efforts/agent/medium",
+        }
+
+    fc_dataset = load_dataset("LLM360/TxT360-3efforts", "agent", split='medium')
+    fc_dataset = fc_dataset.map(reason_fcall_map)
+    fc_dataset = fc_dataset.filter(lambda x: len(x["messages"]) > 2)
+    # fc_dataset = fc_dataset.remove_columns(["conversations"])
+    return fc_dataset
+
+
+
 def hermes_fc_thinking():
     import ast
 
@@ -443,8 +579,9 @@ def hermes_fc_thinking():
                         except:
                             return {"source": "", "messages": []}
                     sanitized_tool_calls = json.dumps(sanitized_tool_calls, indent=None)
+                    think = f"\n{think[0].strip()}\n" if len(think[0].strip()) > 0 else "\n"
                     seq[-1]["content"] = (
-                        f"<think>{think[0].strip()}</think>\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
+                        f"<think>{think}</think>\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
                     )
                 else:
                     seq[-1]["content"] = f"<think>\n</think>\n\n{seq[-1]['content']}"
@@ -803,22 +940,25 @@ def prep_dataset(
 ):
     data_list = {
         "default": [
-            question_decompose_db(),
+            # question_decompose_db(),
             tulu3_persona(),
-            shortcodes_python(),
-            code_feedback(),
-            orca_agentinstruct(),
-            smoltalk("systemchats-30k", tokenizer=tokenizer, seed=seed),
-            smoltalk("everyday-conversations", tokenizer=tokenizer, turn_limit=2),
-            openorca_math(),
+            TxT360_efforts_if('medium'),
+            TxT360_efforts_if('low'),
+            # shortcodes_python(),
+            # code_feedback(),
+            # orca_agentinstruct(),
+            # smoltalk("systemchats-30k", tokenizer=tokenizer, seed=seed),
+            # smoltalk("everyday-conversations", tokenizer=tokenizer, turn_limit=2),
+            # openorca_math(),
         ],
         "fcall": [
-            smoltalk_fcall(sys_template=tool_template),
+            # smoltalk_fcall(sys_template=tool_template),
             hermes_fc_thinking(),
-            function_calling_chatml(),
-            salesfores_tool_ds(),
-            tool_calling_traces(),
-            codeact(),
+            # function_calling_chatml(),
+            # salesfores_tool_ds(),
+            # tool_calling_traces(),
+            TxT360_efforts_toolcall()
+            # codeact(),
         ],
     }[phase]
 
@@ -903,6 +1043,7 @@ if __name__ == "__main__":
     SIZE = ["135M", "360M"][0]
     CONTEXT_LEN = 1024 * 2
     TOKENIZER_PATH = f"HuggingFaceTB/SmolLM2-{SIZE}-Instruct"
+    disable_caching()
 
     tokenizer = get_tokenizer(TOKENIZER_PATH, add_bos=False)
     # General
@@ -928,7 +1069,7 @@ if __name__ == "__main__":
     )
 
     train_ds = concatenate_datasets([phase1, phase2]).shuffle(42)
-    train_ds = pack_data(train_ds, ctx_len=CONTEXT_LEN + 256)
+    train_ds = pack_data(train_ds, ctx_len=CONTEXT_LEN, sort=True, segment_size=256, report=True)
     print("After pack:", train_ds)
 
     DS_LEN = len(train_ds)
@@ -939,6 +1080,9 @@ if __name__ == "__main__":
     for stage, dataset in [("train", train_ds), ("test", test_ds)]:
         source_dist(dataset)
         print(f"Total {stage} dataset length:", len(dataset), flush=True)
-        save_path = f"data/datasets/Smollm2_base_{stage}_v12.jsonl"
+        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_v13.jsonl"
         print("Save path:", save_path, flush=True)
         dataset.to_json(save_path, orient="records")
+
+
+# dataset.cleanup_cache_files()
