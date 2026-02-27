@@ -3,6 +3,7 @@ import json
 import random
 import re
 import textwrap
+from ast import literal_eval
 
 # Prompts to generate reasoning chain
 THINK_STRINGS = [
@@ -20,6 +21,22 @@ THINK_STRINGS = [
     "Think step-by-step inside 'think' tags.",
     "Think inside 'think' tags before generating final answer.",
 ]
+
+def tool_parse(tool_call: str):
+    """
+    Parses tool call in two different formats:
+    {'function_name': 'fun1', 'arguments': {...}}
+    {"function_name": "fun1", "arguments": {...}}
+    """
+    try:
+        return literal_eval(tool_call)
+    except:
+        pass
+    try:
+        return json.loads(tool_call)
+    except:
+        pass
+    return None
 
 def tool_shuffle(tool):
     """
@@ -204,207 +221,6 @@ def short_code(inp_str):
     return True
 
 
-TYPE_MAPPING = {
-    "string": "str",
-    "integer": "int",
-    "number": "float",
-    "boolean": "bool",
-    "array": "List",
-    "object": "Dict",
-}
-
-
-def resolve_type(schema, required_keys=None, level=0):
-    """
-    Recursively resolve the type from a schema object.
-    """
-    if required_keys is None:
-        required_keys = set()
-
-    typ = schema.get("type", "string")
-
-    if typ == "array":
-        items = schema.get("items", {})
-        inner_type = resolve_type(items, required_keys, level + 1)
-        return f"List[{inner_type}]"
-
-    elif typ == "object":
-        props = schema.get("properties", {})
-        reqs = set(schema.get("required", []))
-        lines = []
-        for key, prop in props.items():
-            resolved = resolve_type(prop, reqs, level + 1)
-            if key not in reqs:
-                resolved = f"Optional[{resolved}]"
-            lines.append(f'"{key}": {resolved}')
-        indent = "    " * (level + 2)
-        inner = (",\n" + indent).join(lines)
-        return f"Dict[str, {resolve_type_object(props, reqs, level)}]"
-
-    if isinstance(typ, list):
-        return TYPE_MAPPING.get(typ[0], "Any")
-    return TYPE_MAPPING.get(typ, "Any")
-
-
-def resolve_type_object(props, required_keys, level=0):
-    lines = []
-    for key, prop in props.items():
-        resolved = resolve_type(prop, required_keys, level)
-        if key not in required_keys:
-            resolved = f"Optional[{resolved}]"
-        lines.append(f'"{key}": {resolved}')
-    return (
-        "Any"  # Use Dict[str, Any] instead of full schema in annotations for simplicity
-    )
-
-
-def get_annotation(name, schema, required_keys):
-    base_type = resolve_type(schema, required_keys)
-    if name not in required_keys:
-        return f"Optional[{base_type}]"
-    return base_type
-
-
-def get_description(name, schema, required_keys):
-    desc = schema.get("description", "").strip()
-    typ = resolve_type(schema, required_keys)
-    if name not in required_keys:
-        return f"    {name} ({typ}, optional): {desc}"
-    else:
-        return f"    {name} ({typ}): {desc}"
-
-
-def json_tool_to_function(tool_defs: dict) -> str:
-    if isinstance(tool_defs, str):
-        tool_defs = json.loads(tool_defs)
-    if not isinstance(tool_defs, list):
-        tool_defs = [tool_defs]
-    returns = []
-    for tool_def in tool_defs:
-        name = tool_def.get("name")
-        description = tool_def.get("description", "")
-        parameters = tool_def.get("parameters", {})
-        props = parameters.get("properties", {})
-        required = set(parameters.get("required", []))
-        func_args = []
-        doc_args = []
-        for param_name, param_def in props.items():
-            ann = get_annotation(param_name, param_def, required)
-            func_args.append(f"{param_name}: {ann}")
-            doc_args.append(get_description(param_name, param_def, required))
-
-        func_signature = f"def {name}({', '.join(func_args)}):"
-        indent = random.choice(["  ", "    "])
-        arg_title = random.choice([f"{indent}Args:\n", f"{indent}Arguments:\n", ""])
-        docstring = (
-            f'    """\n{indent}{description}\n\n{arg_title}'
-            + "\n".join(doc_args)
-            + '\n    """'
-        )
-        returns.append(f"{func_signature}\n{docstring}\n")
-
-    return returns
-
-
-def format_value(value):
-    """Format Python values for code representation."""
-    if isinstance(value, str):
-        return f'"{value}"'
-    elif isinstance(value, bool):
-        return "True" if value else "False"
-    elif value is None:
-        return "None"
-    elif isinstance(value, (int, float)):
-        return str(value)
-    elif isinstance(value, list):
-        return "[" + ", ".join(format_value(v) for v in value) + "]"
-    elif isinstance(value, dict):
-        return (
-            "{"
-            + ", ".join(
-                f"{format_value(k)}: {format_value(v)}" for k, v in value.items()
-            )
-            + "}"
-        )
-    else:
-        raise ValueError(f"Unsupported argument type: {type(value)}")
-
-
-def tool_call_to_python_call(tool_calls: dict) -> str:
-    """Convert a JSON tool-call into a Python-style function call string."""
-    if isinstance(tool_calls, str):
-        tool_calls = json.loads(tool_calls)
-    if isinstance(tool_calls, dict):
-        tool_calls = [tool_calls]
-    returns = []
-
-    for tool_call in tool_calls:
-        func_name = tool_call.get("name")
-        arguments = tool_call.get("arguments", {})
-
-        if not func_name:
-            raise ValueError("Missing function name in tool call.")
-
-        args_str = ", ".join(
-            f"{key}={format_value(val)}" for key, val in arguments.items()
-        )
-        returns.append(f"{func_name}({args_str})")
-    return returns
-
-
-if __name__ == "__main__":
-    tools = [
-        {
-            "name": "retrieve_payment_status",
-            "description": "Get payment status of a transaction",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "transaction_id": {
-                        "type": "string",
-                        "description": "The transaction id.",
-                    }
-                },
-                "required": ["transaction_id"],
-            },
-        },
-        {
-            "name": "retrieve_payment_date",
-            "description": "Get payment date of a transaction",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "transaction_id": {
-                        "type": "string",
-                        "description": "The transaction id.",
-                    },
-                    "additional_inputs": {"type": "string", "enums": ["YES", "NO"]},
-                },
-                "required": ["transaction_id"],
-            },
-        },
-    ]
-
-    json_call = json.dumps(
-        [
-            {
-                "name": "web_search",
-                "arguments": {
-                    "search_str": "Dr Yunus",
-                    "result": 5,
-                    "paginate": False,
-                    "kwargs": {"engine": "google", "grab_index": [1, 3, None]},
-                },
-            }
-        ]
-    )
-    python_call = 'web_search(search_str="Dr Yunus",)'  # paginate=False, result=5, kwargs={\"search_engine\": \"google\"}, grab=[1, 3, \"None\"])"
-    print(tool_call_to_python_call(json_call))
-    elems = json_tool_to_function(tools)
-    for elem in elems:
-        print(elem)
-
-
 def dedent_markdown_python_code(markdown_text):
     def dedent_code_block(match):
         code = match.group(1)
@@ -503,3 +319,198 @@ def pack_data(
     if return_list:
         return new_dataset
     return Dataset.from_list(new_dataset)
+
+
+def json_toolcall_to_python(tool_calls: dict, markdown_format=True) -> str:
+    """Convert a JSON tool-call into a Python-style function call string."""
+
+    def format_value(value):
+        """Format Python values for code representation."""
+        if isinstance(value, str):
+            return f'"{value}"'
+        elif isinstance(value, bool):
+            return "True" if value else "False"
+        elif value is None:
+            return "None"
+        elif isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, list):
+            return "[" + ", ".join(format_value(v) for v in value) + "]"
+        elif isinstance(value, dict):
+            return (
+                "{"
+                + ", ".join(
+                    f"{format_value(k)}: {format_value(v)}" for k, v in value.items()
+                )
+                + "}"
+            )
+        else:
+            raise ValueError(f"Unsupported argument type: {type(value)}")
+
+    if isinstance(tool_calls, str):
+        tool_calls = json.loads(tool_calls)
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    returns = []
+
+    for tool_call in tool_calls:
+        func_name = tool_call.get("name")
+        arguments = tool_call.get("arguments", {})
+
+        if not func_name:
+            raise ValueError("Missing function name in tool call.")
+
+        args_str = ", ".join(
+            f"{key}={format_value(val)}" for key, val in arguments.items()
+        )
+        returns.append(f"{func_name}({args_str})")
+    if markdown_format:
+        return f"```python\n{'\n'.join(returns)}\n```"
+    return returns
+
+
+def json_tooldef_to_python(tools: list, indent=None) -> str:
+    """
+    Convert JSON tool descriptions into Python function definitions (as a string).
+
+    - Maps JSON schema types to Python types
+    - Handles required vs optional parameters
+    - Converts enums to Literal types
+    - Adds docstrings from descriptions
+    """
+
+    def map_type(prop: dict) -> str:
+        """Map JSON schema types to Python type hints."""
+        t = prop.get("type", "any")
+        if not isinstance(t, str):
+            t = 'any'
+
+        # Handle enum -> Literal
+        if "enum" in prop or "enums" in prop:
+            values = prop.get("enum") or prop.get("enums")
+            literals = ", ".join(repr(v) for v in values)
+            return f"Literal[{literals}]"
+
+        return {
+            "string": "str",
+            "str": "str",
+            "integer": "int",
+            "int": "int",
+            "number": "float",
+            "float": "float",
+            "boolean": "bool",
+            "array": "List[Any]",
+            "list": "List[Any]",
+            "object": "object",
+            "any": "Any",
+            "null": "None",
+        }.get(t, "Any")
+
+    lines = []
+    if indent is None:
+        indent = random.randint(0, 6)
+
+    if isinstance(tools, str):
+        try:
+            tools = tool_parse(tools)
+        except Exception as E:
+            print(tools)
+            raise E
+
+    for tool in tools:
+        if isinstance(tool, str):
+            try:
+                tool = tool_parse(tools)
+            except Exception as E:
+                print(tool)
+                raise E
+        # print(tool)
+        name = tool["name"]
+        desc = tool.get("description", "")
+        params = tool.get("parameters", {})
+        props = params.get("properties", {})
+        required = set(params.get("required", []))
+
+        args_list = []
+        doc_params = []
+
+        for p_name, p_info in props.items():
+            # print(p_name, '->', p_info)
+            py_type = map_type(p_info)
+            # Required vs optional
+            if p_name in required:
+                arg = f"{p_name}: {py_type}"
+            else:
+                arg = f"{p_name}: Optional[{py_type}] = None"
+            args_list.append(arg)
+
+            # Parameter doc
+            p_desc = p_info.get("description")
+            if p_desc:
+                doc_params.append(f"{' '*indent}{p_name}: {p_desc}")
+
+        args_str = ", ".join(args_list)
+        
+        # Build function string
+        func_def = f"def {name}({args_str}):\n"
+        func_def += f'{" "*indent}"""{desc}\n\n'
+        if doc_params:
+            func_def += f"{' '*indent}Args:\n" + "\n".join(doc_params) + "\n"
+        func_def += f'{" "*indent}"""\n'
+        func_def += f"{' '*(indent)}pass\n"
+
+        lines.append(func_def)
+
+    return "\n\n".join(lines)
+
+
+if __name__ == "__main__":
+    tools = [
+        {
+            "name": "retrieve_payment_status",
+            "description": "Get payment status of a transaction",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {
+                        "type": "string",
+                        "description": "The transaction id.",
+                    }
+                },
+                "required": ["transaction_id"],
+            },
+        },
+        {
+            "name": "retrieve_payment_date",
+            "description": "Get payment date of a transaction",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {
+                        "type": "string",
+                        "description": "The transaction id.",
+                    },
+                    "additional_inputs": {"type": "string", "enums": ["YES", "NO"]},
+                },
+                "required": ["transaction_id"],
+            },
+        },
+    ]
+
+    json_call = json.dumps(
+        [
+            {
+                "name": "web_search",
+                "arguments": {
+                    "search_str": "Dr Yunus",
+                    "result": 5,
+                    "paginate": False,
+                    "kwargs": {"engine": "google", "grab_index": [1, 3, None]},
+                },
+            }
+        ]
+    )
+    python_call = 'web_search(search_str="Dr Yunus",)'  # paginate=False, result=5, kwargs={\"search_engine\": \"google\"}, grab=[1, 3, \"None\"])"
+    print(json_toolcall_to_python(tools))
+    print(json_tooldef_to_python(json_call))
+    

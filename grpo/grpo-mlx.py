@@ -58,7 +58,7 @@ from utils.webtool import tool_call_extract
 class TrainConfig:
     # Iterations
     ITERS = 3_000
-    GENERATE_DATA = False
+    GENERATE_DATA = True
     BATCH_SIZE = 1
     GEN_LEN = 256 + 128
     SAVE_FREQ = 50
@@ -78,8 +78,8 @@ class TrainConfig:
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
     MAX_INPUT_LEN = 256 # 768
     SAVE_PATH = "weights/NanoAgent-135M-grpo-ifeval"
-    DATA_PATH = "data/datasets/grpo_math.pickle"
-    MODEL = "quwsarohi/NanoAgent-135M" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
+    DATA_PATH = "data/datasets/grpo_cache.pickle"
+    MODEL = "quwsarohi/NanoAgent-135M-think" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
@@ -254,14 +254,14 @@ if TrainConfig.GENERATE_DATA:
     # sz = int(ds_size * 0.4)
     # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
     # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
-    # sz = int(ds_size * 1)
-    # train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
+    sz = int(ds_size * 0.6)
+    train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
     # sz = int(ds_size * 0.4)
+    train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
     # random.shuffle(train_ds)
     # train_ds = train_ds[:sz]
     # print("IF-Eval DS size:", len(train_ds))
 
-    # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
     
     # --- Tool Call ---
     # sz = int(ds_size * 0.5)
@@ -270,18 +270,18 @@ if TrainConfig.GENERATE_DATA:
     # train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
 
     # --- Math Mix ---
-    sz = int(ds_size * 0.25)
-    train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.1)
-    train_ds += syllogism(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.3)
-    train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.15)
-    train_ds += chain_sum(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.1)
-    train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.1)
-    train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
+    # sz = int(ds_size * 0.25)
+    # train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.1)
+    # train_ds += syllogism(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.3)
+    # train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.15)
+    # train_ds += chain_sum(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.1)
+    # train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.1)
+    # train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
     
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))

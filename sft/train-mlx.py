@@ -29,7 +29,7 @@ from utils.utils import grad_checkpoint
 @dataclass
 class TrainConfig:
     # Base model config
-    MODEL = "quwsarohi/NanoAgent-135M"
+    MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct" #"quwsarohi/NanoAgent-135M"
     # Iterations
     EPOCHS = 2.1
     BATCH_SIZE = 1
@@ -37,7 +37,7 @@ class TrainConfig:
     LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 15000) # 101453
+    WARMUP_STEPS = int(0.1 * 29686) # 101453
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -45,10 +45,11 @@ class TrainConfig:
     # Full SFT LR: 1e-4
     # Continued SFT LR: 1e-5
     MAX_LEARNING_RATE = 1e-4
-    WEIGHT_DECAY = 0.1
+    WEIGHT_DECAY = 0 # 0.1
+    DFT_WEIGHT = 0.9
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = None
-    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-v13"
+    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-agentic-dft"
 
 
 config_dict = {
@@ -274,12 +275,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_v13.jsonl",
+    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_agentic.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_v13.jsonl",
+    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_agentic.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -336,33 +337,33 @@ scheduler_adam = cosine_decay_with_warmup(
     warmup_steps=TrainConfig.WARMUP_STEPS,
 )
 
-scheduler_muon = cosine_decay_with_warmup(
-    max_lr=TrainConfig.MAX_LEARNING_RATE * 10 * 2,
-    min_lr=TrainConfig.MIN_LEARNING_RATE,
-    total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
-    warmup_steps=TrainConfig.WARMUP_STEPS,
-)
-
-# optimizer = optim.AdamW(
-#     learning_rate=scheduler,
-#     weight_decay=TrainConfig.WEIGHT_DECAY,
-#     # betas=[0.9, 0.95],
-#     # SQRT Scaling: bi = 1 - scale_val * (1 - bi)
-#     betas=[0.9, 0.99],
+# scheduler_muon = cosine_decay_with_warmup(
+#     max_lr=TrainConfig.MAX_LEARNING_RATE * 10 * 2,
+#     min_lr=TrainConfig.MIN_LEARNING_RATE,
+#     total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
+#     warmup_steps=TrainConfig.WARMUP_STEPS,
 # )
 
-optimizer = optim.MultiOptimizer(
-    [        
-        optim.Muon(
-            learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
-        ),
-        optim.AdamW(
-            learning_rate=scheduler_adam, betas=[0.9, 0.99], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
-        )
-    ],
-    # Where muon will be applied
-    [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
+optimizer = optim.AdamW(
+    learning_rate=scheduler_adam,
+    weight_decay=TrainConfig.WEIGHT_DECAY,
+    # betas=[0.9, 0.95],
+    # SQRT Scaling: bi = 1 - scale_val * (1 - bi)
+    betas=[0.9, 0.99],
 )
+
+# optimizer = optim.MultiOptimizer(
+#     [        
+#         optim.Muon(
+#             learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
+#         ),
+#         optim.AdamW(
+#             learning_rate=scheduler_adam, betas=[0.9, 0.99], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+#         )
+#     ],
+#     # Where muon will be applied
+#     [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
+# )
 
 
 def get_batch(dataset, idx=1, batch_size=1):
@@ -470,9 +471,21 @@ def cal_loss(model, x, y, weights):
     logits = model(x)
     # Shape: (bs, ctx_len)
     tok_loss = nn.losses.cross_entropy(logits, y, reduction="none")
-    total_toks = mx.maximum(weights.sum(), 1e-12)
-    ce_loss = (tok_loss * weights).sum() / total_toks
-    return ce_loss
+    total_toks = mx.maximum(weights.sum(), 1e-7)
+
+    if TrainConfig.DFT_WEIGHT > 0:
+        # DFT ref: https://github.com/yongliang-wu/DFT/ | https://github.com/Lauorie/DFT
+        # Another implementation: memory and compute efficient
+        # Ref: https://github.com/yongliang-wu/DFT/issues/5
+        probs_at_labels = mx.exp(mx.stop_gradient(-tok_loss))
+        dft_weight = 1 #0.9  # 1
+        probs_at_labels = probs_at_labels * dft_weight + (1 - dft_weight)
+        dft_loss = (tok_loss * probs_at_labels * weights).sum() / total_toks
+        return dft_loss
+    else:
+        total_toks = mx.maximum(weights.sum(), 1e-12)
+        ce_loss = (tok_loss * weights).sum() / total_toks
+        return ce_loss
 
 
 state = [model.state, optimizer.state]

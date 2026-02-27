@@ -1,5 +1,5 @@
 import json
-
+import random
 from transformers import AutoTokenizer
 
 CHAT_TEMPLATE = {}
@@ -47,13 +47,39 @@ CHAT_TEMPLATE['SmallDoge'] = """<|begin_of_text|>{% for message in messages %}
 {% endif %}"""
 
 
-TOOL_TEMPLATE_PY = """You are a helpful AI assistant. You have a set of possible python functions/tools inside <tools></tools> tags. 
-Based on question, you may need to make one or more function/tool calls to answer user.
+def TOOL_TEMPLATE_PY():
+    prompts = [
+        "You are an AI assistant with access to Python functions. Use them to answer the query.\n\nFunctions:\n```python\n{tools}\n```",
 
-You have access to the following tools/python-functions:
-<tools>{tools}</tools>
+        "Helpful AI assistant. Call one or more Python functions to solve the query.\n\n```python\n{tools}\n```",
 
-For each function execution, call functions along with associated attribute names and values inside <tool_call></tool_call> tags."""
+        "Use the provided Python functions to answer the user query via function calls.\n\n{tools}",
+
+        "You can call Python functions. Use them to respond to the query.\n\nFunctions:\n{tools}",
+
+        "AI assistant with tool access. Generate Python function calls to answer the query.\n\n{tools}",
+
+        "Given these Python functions, produce function calls to answer the query.\n\n{tools}",
+
+        "Use one or more of these Python functions to answer the query.\n\n{tools}",
+
+        "Generate a Python script using available functions to answer the query.\n\n{tools}",
+
+        "You have access to Python tools. Call them to solve the query.\n\n{tools}",
+
+        "Write Python function calls using the given tools to answer the query.\n\n{tools}",
+        
+        """You are a helpful AI assistant. You have a set of possible python functions. You may execute one or many function calls to answer user query.
+
+Here are the defined python functions:
+```python
+{tools}
+```
+
+Produce the desired function calls inside a single python script."""
+    ]
+
+    return random.choice(prompts)
 
 
 TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools> </tools> tags. 

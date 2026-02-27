@@ -127,23 +127,6 @@ class StopWordCriteria(StoppingCriteria):
         return result
 
 
-def tool_parse(tool_call: str):
-    """
-    Parses tool call in two different formats:
-    {'function_name': 'fun1', 'arguments': {...}}
-    {"function_name": "fun1", "arguments": {...}}
-    """
-    try:
-        return literal_eval(tool_call)
-    except:
-        pass
-    try:
-        return json.loads(tool_call)
-    except:
-        pass
-    return None
-
-
 def tool_call_extract(inp_str: str):
     """
     Extracts tool call from format:
