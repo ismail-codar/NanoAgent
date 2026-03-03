@@ -8,7 +8,7 @@ from copy import deepcopy
 from datasets import Dataset, concatenate_datasets, load_dataset, disable_caching
 from semhash import SemHash
 from utils.tokenizer import TOOL_TEMPLATE, TOOL_TEMPLATE_PY, get_tokenizer
-from data.utils import json_toolcall_to_python, json_tooldef_to_python, tool_parse
+from data.utils import tool_parse
 
 from data.utils import (
     THINK_STRINGS,
@@ -189,16 +189,13 @@ def function_calling_chatml():
                 if isinstance(tool_def, dict):
                     tool_def = [tool_def]
                 tool_def = [tool.get("function", tool) for tool in tool_def]
-                tool_def = tool_shuffle(tool_def)
-                tool_def = json_tooldef_to_python(tool_def)
                 seq = [
-                    {"role": "system", "content": TOOL_TEMPLATE_PY().format(tools=tool_def)}
+                    {"role": "system", "content": TOOL_TEMPLATE.format(tools=tool_def)}
                 ]
             except:
                 print(f"TOOL: {tool_def}", flush=True)
-                all_good = False
                 seq = [
-                    {"role": "system", "content": TOOL_TEMPLATE_PY().format(tools=tool_def)}
+                    {"role": "system", "content": TOOL_TEMPLATE.format(tools=tool_def)}
                 ]
 
         tool_call = None
@@ -219,16 +216,16 @@ def function_calling_chatml():
                     tool_call = tool_parse(tool_call)
                     if not isinstance(tool_call, list):
                         tool_call = [tool_call]
-                    content = json_toolcall_to_python(tool_call, markdown_format=True)
-                    # content = json.dumps(tool_call)
+                    content = json.dumps(tool_call)
                     called_map[tool_call[0]["name"]] += 1
+                    content = f"<tool_call>{content}</tool_call>"
                     all_good = called_map[tool_call[0]["name"]] <= 500
                 except:
                     content = ""
                     all_good = False
 
             elif role == "function-response":
-                content = f"```console\n{content.strip()}\n```"
+                content = f"<tool_result>{content.strip()}</tool_result>"
 
             role = {
                 "human": "user",
@@ -310,9 +307,9 @@ def codeact():
                         random.choice(prompt_str)
                         + content[pos + len(match_str) :].strip()
                     )
-                    # content += random.choice(["\n", "\n\n"]) + random.choice(
-                    #     THINK_STRINGS
-                    # )
+                    content += random.choice(["\n", "\n\n"]) + random.choice(
+                        THINK_STRINGS
+                    )
                 else:
                     continue
 
@@ -351,7 +348,7 @@ def codeact():
                     content = content.replace("<solution>", "").replace(
                         "</solution>", ""
                     )
-                content = f"{thought}\n\n{content}"
+                content = f"<think>{thought}</think>\n\n{content}"
 
             content = content.strip()
             content = replace_execute_blocks(content)
@@ -446,8 +443,8 @@ def TxT360_efforts_toolcall():
                     seq.append(
                         {
                             "role": "system",
-                            "content": TOOL_TEMPLATE_PY().format(
-                                tools=json_tooldef_to_python(tool_shuffle(turn['tools']))
+                            "content": TOOL_TEMPLATE.format(
+                                tools=tool_shuffle(turn['tools'])
                             )
                             # + "\n"
                             # + random.choice(THINK_STRINGS),
@@ -484,16 +481,15 @@ def TxT360_efforts_toolcall():
 
                 if tool_calls:
                     sanitized_tool_calls = json.dumps(tool_calls, indent=None)
-                    sanitized_tool_calls = json_toolcall_to_python(sanitized_tool_calls, markdown_format=True)
                     seq.append({
                         'role': 'assistant',
-                        'content': f"{think.strip()}\n\n{sanitized_tool_calls}"
+                        'content': f"{think.strip()}\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
                     })
                 else:
                     seq.append({
                         'role': 'assistant',
+                        'content': resp.strip()
                         # 'content': f"<think>{think.strip()}</think>\n{resp}"
-                        'content': resp
                     })
             elif turn['role'] == 'user':
                 try:
@@ -518,6 +514,7 @@ def TxT360_efforts_toolcall():
 
 
 
+
 def hermes_fc_thinking():
     import ast
 
@@ -534,14 +531,14 @@ def hermes_fc_thinking():
                     tool_def = ast.literal_eval(tool_def[0])
                     tool_def = [tool.get("function", tool) for tool in tool_def]
                     tool_names = [tool["name"] for tool in tool_def]
-                    tool_def = tool_shuffle(tool_def)
-                    tool_def = json_tooldef_to_python(tool_def)
                     seq.append(
                         {
                             "role": "system",
-                            "content": TOOL_TEMPLATE_PY().format(
-                                tools=tool_def
+                            "content": TOOL_TEMPLATE.format(
+                                tools=tool_shuffle(tool_def)
                             )
+                            + "\n"
+                            + random.choice(THINK_STRINGS),
                         }
                     )
                     continue
@@ -584,22 +581,19 @@ def hermes_fc_thinking():
                         except:
                             return {"source": "", "messages": []}
                     sanitized_tool_calls = json.dumps(sanitized_tool_calls, indent=None)
-                    think = think[0].strip()
-                    # seq[-1]["content"] = (
-                    #     f"<think>{think}</think>\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
-                    # )
-                    if think: think += "\n\n"
-                    seq[-1]["content"] = think + json_toolcall_to_python(sanitized_tool_calls, markdown_format=True)
+                    think = f"\n{think[0].strip()}\n" if len(think[0].strip()) > 0 else "\n"
+                    seq[-1]["content"] = (
+                        f"<think>{think}</think>\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
+                    )
                 else:
-                    # seq[-1]["content"] = f"<think>\n</think>\n\n{seq[-1]['content']}"
-                    seq[-1]["content"] = seq[-1]['content']
+                    seq[-1]["content"] = f"<think>\n</think>\n\n{seq[-1]['content']}"
 
             if seq[-1]["role"] == "tool":
                 seq[-1]["content"] = seq[-1]["content"].replace("<tool_response>", "")
                 seq[-1]["content"] = seq[-1]["content"].replace("</tool_response>", "")
                 data = ast.literal_eval(seq[-1]["content"].strip())
                 seq[-1]["role"] = "user"
-                seq[-1]["content"] = f"```console\n{json.dumps(data)}\n```"
+                seq[-1]["content"] = f"<tool_result>{json.dumps(data)}</tool_result>"
         return {
             "messages": seq,
             "source": "Jofthomas/hermes-function-calling-thinking-V1",
@@ -612,7 +606,7 @@ def hermes_fc_thinking():
     return fc_dataset
 
 
-def smoltalk_fcall(n_data=None):
+def smoltalk_fcall(sys_template, n_data=None):
     called_map = defaultdict(int)
 
     def tool_call_process(data):
@@ -643,23 +637,13 @@ def smoltalk_fcall(n_data=None):
             print(tool_def)
             return new_data
 
-        # print(tool_def)
-        try:
-            tool_def = tool_shuffle(tool_def)
-            tool_def = json_tooldef_to_python(tool_def)
-        except Exception as E:
-            return new_data
-
-        seq = [{"role": "system", "content": TOOL_TEMPLATE_PY().format(tools=tool_def)}]
+        tool_def = tool_shuffle(tool_def)
+        seq = [{"role": "system", "content": sys_template.format(tools=tool_def)}]
         for s in data["messages"]:
             if s["role"] == "system":
                 continue
             if s["role"] == "user":
-                content = s['content'].strip()
-                if content.startswith('<tool_result>'):
-                    seq.append({'role': 'user', 'content': f"```console\n{content.removeprefix('<tool_result>').removesuffix("</tool_result>")}\n```"})
-                else:
-                    seq.append(s)
+                seq.append(s)
             elif s["role"] == "assistant":
                 tool_calls = re.findall(
                     r"<tool_call>(.*?)</tool_call>", s["content"], re.DOTALL
@@ -675,8 +659,7 @@ def smoltalk_fcall(n_data=None):
                     seq.append(
                         {
                             "role": "assistant",
-                            "content": json_toolcall_to_python(tool_calls, markdown_format=True)
-                            # "content": f"<tool_call>{tool_calls}</tool_call>",
+                            "content": f"<tool_call>{tool_calls}</tool_call>",
                         }
                     )
                 else:
@@ -817,21 +800,14 @@ def salesfores_tool_ds():
             tool_calls = [tool_calls]
         if not isinstance(tools, list):
             tools = [tools]
-        try:
-            tool_calls = json_toolcall_to_python(tool_calls, markdown_format=True)
-            seq = [
-                {
-                    "role": "system",
-                    "content": TOOL_TEMPLATE_PY().format(tools=json_tooldef_to_python(tool_shuffle(tools))),
-                },
-                {"role": "user", "content": data["query"]},
-                {"role": "assistant", "content": tool_calls},
-            ]
-        except Exception as E:
-            return {
-                "messages": [],
-                "source": "Salesforce/xlam-function-calling-60k",    
-            }
+        seq = [
+            {
+                "role": "system",
+                "content": TOOL_TEMPLATE.format(tools=tool_shuffle(tools)),
+            },
+            {"role": "user", "content": data["query"]},
+            {"role": "assistant", "content": f"<tool_call>{tool_calls}</tool_call>"},
+        ]
         return {
             "messages": seq,
             "source": "Salesforce/xlam-function-calling-60k",
@@ -840,7 +816,6 @@ def salesfores_tool_ds():
     ds = load_dataset("Salesforce/xlam-function-calling-60k")["train"]
     ds = ds.map(mapper)
     ds = ds.remove_columns(["id", "query", "answers", "tools"])
-    ds = ds.filter(lambda d: len(d['messages']) > 0)
     return ds
 
 
@@ -954,81 +929,175 @@ def openorca_math():
     return ds
 
 
+def nemotron_instruct():
+    def mapper(data):
+        messages = []
+        if len(data['tools']) > 0:
+            messages.append({'role': 'system', 'content': TOOL_TEMPLATE.format(tools=json.dumps(data['tools'], indent=random.randint(0, 4)))})
+        for idx, turn in enumerate(data['_messages']):
+            assert turn['role'] in ['system', 'user', 'assistant']
+            if turn['content'] == '': continue
+            assert isinstance(turn['content'], str)
+            messages.append({'role': turn['role'], 'content': turn['content']})
+        # print([m.keys() for m in messages])
+        return {
+            "messages": messages,
+            "source": "nvidia/Nemotron-Instruction-Following-Chat-v1"
+        }
+
+    ds = load_dataset("nvidia/Nemotron-Instruction-Following-Chat-v1")
+    ds = concatenate_datasets([ds['chat_if'], ds['structured_outputs']])
+    ds = ds.rename_column('messages', '_messages')
+    ds = ds.map(mapper)
+    ds = ds.remove_columns(["_messages", "uuid", "license", "used_in", "reasoning", "capability_target", "tools"])
+    ds = ds.filter(lambda x: any([m['content'] is not None and m['role'] is not None] for m in x['messages']))
+    # ds = ds.map(lambda x: [])
+    # print(ds)
+    # print(ds['messages'][0])
+    return ds
+
+
+def nemotron_agentic(tool_limit=6):
+    def mapper(data):
+        tools = data["tools"]
+        tools = [t.get('function', t) for t in tools]
+        messages = []
+        called_tools = []
+        
+        for turn in data['messages']:
+            role = turn['role']
+            content = turn['content']
+            if isinstance(content, str):
+                content = content.strip()
+            if role in ['user', 'system']:
+                if content.strip():
+                    messages.append({'role': role, 'content': content.strip()})
+            elif role == 'assistant':
+                tool_calls = turn.get('tool_calls')
+                if tool_calls is not None:
+                    tool_calls = [t.get('function', t) for t in tool_calls]
+                    called_tools.extend([t['name'] for t in tool_calls])
+                    tool_calls = json.dumps(tool_calls, indent=None)
+                    reasoning = turn.get('reasoning_content', '')
+                    if reasoning: reasoning += "\n\n"
+                    messages.append({"role": role, 'content': f"{reasoning}<tool_call>{tool_calls}</tool_call>"})
+                else:
+                    messages.append({'role': role, 'content': content.strip()})
+            elif role == 'tool':
+                messages.append({'role': 'user', 'content': f"<tool_result>{content}</tool_result>"})
+            else:
+                raise NotImplementedError
+
+        # Delete excess tool defs
+        # random.shuffle(tools)
+        # del_idx = []
+        # for i, t in enumerate(tools):
+        #     if t['name'] in called_tools_name or tot_tools < tool_limit:
+        #         tot_tools += 1
+        #     else:
+        #         del_idx.append(i)
+        
+        # del_idx = sorted(del_idx, reverse=True)
+        # for di in del_idx:
+        #     del tools[di]
+        
+        return {
+            "messages": [{'role': 'system', 'content': TOOL_TEMPLATE.format(tools=json.dumps(tools, indent=random.choice([None, 1, 2, 3, 4, 6])))}] + messages,
+            "source": "nemotron/interactive_agent"
+        }
+
+    train_ds = []
+    with open('data/datasets/nemotron/tool_calling.jsonl', 'r') as f:
+        for l in f:
+            train_ds.append(json.loads(l))
+            if len(train_ds) > 500_000: break
+    with open('data/datasets/nemotron/interactive_agent.jsonl', 'r') as f:
+        for l in f:
+            train_ds.append(json.loads(l))
+    train_ds = list(map(mapper, train_ds))
+    train_ds = Dataset.from_list(train_ds)
+    return train_ds
+
+
 def prep_dataset(
     phase,
-    context_len,
     tokenizer,
-    tool_template,
     seed,
+    context_len=None,
     dedupe_threshold=None,
     selection_size=None,
-    pack=True,
     max_resp_len=None,
 ):
     data_list = {
         "default": [
-            question_decompose_db(),
-            tulu3_persona(),
-            # TxT360_efforts_if('medium'),
-            # TxT360_efforts_if('low'),
-            shortcodes_python(),
-            code_feedback(),
-            orca_agentinstruct(),
-            smoltalk("systemchats-30k", tokenizer=tokenizer, seed=seed),
-            # smoltalk("everyday-conversations", tokenizer=tokenizer, turn_limit=2),
-            openorca_math(),
+            nemotron_instruct(),
+            # question_decompose_db(),
+            # tulu3_persona(),
+            # # TxT360_efforts_if('medium'),
+            # # TxT360_efforts_if('low'),
+            # shortcodes_python(),
+            # code_feedback(),
+            # orca_agentinstruct(),
+            smoltalk("systemchats-30k", tokenizer=tokenizer),
+            smoltalk("everyday-conversations", tokenizer=tokenizer),
+            smoltalk("systemchats-30k", tokenizer=tokenizer),
+            smoltalk("everyday-conversations", tokenizer=tokenizer),
+            # openorca_math(),
+            
         ],
         "fcall": [
-            smoltalk_fcall(),
-            hermes_fc_thinking(),
+            # smoltalk_fcall(),
+            # hermes_fc_thinking(),
             function_calling_chatml(),
-            salesfores_tool_ds(),
-            # tool_calling_traces(),
+            # salesfores_tool_ds(),
+            # # tool_calling_traces(),
             TxT360_efforts_toolcall(),
-            codeact(),
+            # codeact(),
+            nemotron_agentic()
         ],
     }[phase]
 
     for e in data_list:
+        print(e['source'][0])
         print(e)
 
     dataset_full = concatenate_datasets(data_list).shuffle(seed=seed)
     del data_list
 
-    dataset_full = dataset_full.filter(
-        lambda d: all(
-            code_markdown_filter(turn["content"], remove_python=False)
-            for turn in d["messages"]
-        )
-        or (
-            d["source"]
-            in [
-                "HuggingFaceTB/smoltalk/apigen-80k",
-                "Locutusque/function-calling-chatml",
-            ]
-        )
-    )
-    print("After code filter:\n", dataset_full)
+    # dataset_full = dataset_full.filter(
+    #     lambda d: all(
+    #         code_markdown_filter(turn["content"], remove_python=False)
+    #         for turn in d["messages"]
+    #     )
+    #     or (
+    #         d["source"]
+    #         in [
+    #             "HuggingFaceTB/smoltalk/apigen-80k",
+    #             "Locutusque/function-calling-chatml",
+    #         ]
+    #     )
+    # )
+    # print("After code filter:\n", dataset_full)
 
-    dataset_full = dataset_full.filter(
-        lambda d: all(filter_non_english(turn["content"]) for turn in d["messages"])
-    )
-    print("Non english removal:\n", dataset_full)
+    # dataset_full = dataset_full.filter(
+    #     lambda d: all(filter_non_english(turn["content"]) for turn in d["messages"])
+    # )
+    # print("Non english removal:\n", dataset_full)
 
-    dataset_full = dataset_full.filter(
-        lambda d: all(
-            remove_code_mentions(turn["content"], remove_python=False)
-            for turn in d["messages"]
-        )
-        or (
-            d["source"]
-            in [
-                "HuggingFaceTB/smoltalk/apigen-80k",
-                "Locutusque/function-calling-chatml",
-            ]
-        )
-    )
-    print("After remove code:\n", dataset_full)
+    # dataset_full = dataset_full.filter(
+    #     lambda d: all(
+    #         remove_code_mentions(turn["content"], remove_python=False)
+    #         for turn in d["messages"]
+    #     )
+    #     or (
+    #         d["source"]
+    #         in [
+    #             "HuggingFaceTB/smoltalk/apigen-80k",
+    #             "Locutusque/function-calling-chatml",
+    #         ]
+    #     )
+    # )
+    # print("After remove code:\n", dataset_full)
 
     dataset_full = dataset_full.map(
         lambda data: {
@@ -1038,16 +1107,19 @@ def prep_dataset(
             ),
         }
     )
+    
+    if max_resp_len:
+        dataset_full = filter_by_resp_len(dataset_full, max_resp_len)
+    
     # Tokenizing and context len cal
     dataset_full = dataset_full.map(
         lambda data: {**data, "ctx_len": len(tokenizer.encode(data["conversations"]))}
     )
-    dataset_full = dataset_full.filter(
-        lambda d: d["ctx_len"] < max(1024 * 2, context_len)
-    )
 
-    if max_resp_len:
-        dataset_full = filter_by_resp_len(dataset_full, max_resp_len)
+    if context_len:
+        dataset_full = dataset_full.filter(
+            lambda d: d["ctx_len"] < max(1024 * 2, context_len)
+        )
 
     if dedupe_threshold:
         semhash = SemHash.from_records(records=dataset_full, columns=["conversations"])
@@ -1060,11 +1132,11 @@ def prep_dataset(
         rep_result = semhash.self_find_representative(selection_size=selection_size)
         dataset_full = Dataset.from_list(rep_result.selected)
 
-    if pack:
-        dataset_full = dataset_full.shuffle(seed=seed)
-        dataset_full = pack_data(dataset_full, ctx_len=context_len + 256)
-        dataset_full = dataset_full.shuffle(seed=seed)
-        print("After pack:", dataset_full)
+    # if pack:
+    #     dataset_full = dataset_full.shuffle(seed=seed)
+    #     dataset_full = pack_data(dataset_full, ctx_len=context_len + 256 if context_len is not None else 1024*8)
+    #     dataset_full = dataset_full.shuffle(seed=seed)
+    #     print("After pack:", dataset_full)
 
     return dataset_full
 
@@ -1073,30 +1145,29 @@ if __name__ == "__main__":
     SIZE = ["135M", "360M"][0]
     CONTEXT_LEN = 1024 * 2
     TOKENIZER_PATH = f"HuggingFaceTB/SmolLM2-{SIZE}-Instruct"
-    disable_caching()
+    # disable_caching()
+    # dataset.cleanup_cache_files()
 
     tokenizer = get_tokenizer(TOKENIZER_PATH, add_bos=False)
-    # General
-    phase1 = prep_dataset(
-        phase="default",
-        context_len=CONTEXT_LEN,
-        tokenizer=tokenizer,
-        tool_template=TOOL_TEMPLATE,
-        seed=123,
-        dedupe_threshold=0.95,
-        pack=False,
-        max_resp_len=1024,
-    )
     # Function-call
     # phase2 = prep_dataset(
     #     phase="fcall",
-    #     context_len=CONTEXT_LEN,
+    #     # context_len=CONTEXT_LEN,
     #     tokenizer=tokenizer,
-    #     tool_template=TOOL_TEMPLATE,
-    #     dedupe_threshold=0.999,
     #     seed=123,
-    #     pack=False,
+    #     # dedupe_threshold=0.999,
+    #     max_resp_len=512 * 3,
     # )
+    # General
+    phase1 = prep_dataset(
+        phase="default",
+        context_len=1024*6,
+        tokenizer=tokenizer,
+        seed=123,
+        # dedupe_threshold=0.95,
+        # max_resp_len=1024*2,
+    )
+    
 
     # train_ds = concatenate_datasets([phase1, phase2]).shuffle(42)
     train_ds = phase1.shuffle(42)
@@ -1111,9 +1182,6 @@ if __name__ == "__main__":
     for stage, dataset in [("train", train_ds), ("test", test_ds)]:
         source_dist(dataset)
         print(f"Total {stage} dataset length:", len(dataset), flush=True)
-        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_agentic.jsonl"
+        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_nemotron_agentic.jsonl"
         print("Save path:", save_path, flush=True)
         dataset.to_json(save_path, orient="records")
-
-
-# dataset.cleanup_cache_files()

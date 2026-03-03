@@ -29,27 +29,29 @@ from utils.utils import grad_checkpoint
 @dataclass
 class TrainConfig:
     # Base model config
-    MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct" #"quwsarohi/NanoAgent-135M"
+    # MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct" #"quwsarohi/NanoAgent-135M"
+    MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
     # Iterations
-    EPOCHS = 2.1
+    EPOCHS = 1.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
     LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 29686) # 101453
+    WARMUP_STEPS = int(0.1 * 190203)
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
     # * https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
     # Full SFT LR: 1e-4
-    # Continued SFT LR: 1e-5
-    MAX_LEARNING_RATE = 1e-4
+    MAX_LEARNING_RATE = 1e-4 # 2e-5 linear or 1e-4 cosine
+    SCHEDULER = 'cosine'
     WEIGHT_DECAY = 0 # 0.1
-    DFT_WEIGHT = 0.9
+    KL_DIV_WEIGHT = 0
+    DFT_WEIGHT = 0
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = None
-    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-agentic-dft"
+    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-nemotron-instruct"
 
 
 config_dict = {
@@ -68,6 +70,10 @@ if not os.path.exists(cache_mlx_path):
 
 print("Model loading from:", cache_mlx_path)
 model, tokenizer = load(cache_mlx_path)
+if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:
+    ref_model, _ = load(cache_mlx_path)
+    ref_model.eval().freeze()
+    print("KL Divergence model loading from:", cache_mlx_path)
 # model.generation_config.pad_token_id = tokenizer.pad_token_id
 # model.generation_config.eos_token_id = tokenizer.eos_token_id
 
@@ -275,12 +281,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_agentic.jsonl",
+    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_nemotron_instruct.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_agentic.jsonl",
+    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_nemotron_instruct.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -307,6 +313,30 @@ eval_dataset = Dataset(
     plw=0.0,
 )
 
+# Learning Rate Schedulers
+def linear_decay_with_warmup(
+    base_lr: float,
+    total_steps: int,
+    warmup_steps: int,
+    decay_steps: int,
+):
+    assert total_steps > warmup_steps + decay_steps
+    def schedule(step):
+        # Linear warmup: 0 → base_lr
+        warmup_lr = base_lr * step / warmup_steps
+        # Linear decay: base_lr → 0
+        decay_progress = (step - (total_steps - decay_steps)) / decay_steps
+        decay_lr = base_lr * (1.0 - decay_progress)
+        return mx.where(
+            step < warmup_steps,
+            warmup_lr,
+            mx.where(
+                step >= (total_steps - decay_steps),
+                mx.maximum(decay_lr, 0.0),
+                base_lr
+            )
+        )
+    return schedule
 
 def cosine_decay_with_warmup(
     max_lr: float,
@@ -330,12 +360,22 @@ def cosine_decay_with_warmup(
     return schedule
 
 
-scheduler_adam = cosine_decay_with_warmup(
-    max_lr=TrainConfig.MAX_LEARNING_RATE,
-    min_lr=TrainConfig.MIN_LEARNING_RATE,
-    total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
-    warmup_steps=TrainConfig.WARMUP_STEPS,
-)
+if TrainConfig.SCHEDULER == 'cosine':
+    scheduler_adam = cosine_decay_with_warmup(
+        max_lr=TrainConfig.MAX_LEARNING_RATE,
+        min_lr=TrainConfig.MIN_LEARNING_RATE,
+        total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
+        warmup_steps=TrainConfig.WARMUP_STEPS,
+    )
+elif TrainConfig.SCHEDULER == 'linear':
+    scheduler_adam = linear_decay_with_warmup(
+        base_lr=TrainConfig.MAX_LEARNING_RATE,
+        total_steps=int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE,
+        warmup_steps=TrainConfig.WARMUP_STEPS,
+        decay_steps=TrainConfig.WARMUP_STEPS,
+    )
+else:
+    raise NotImplementedError
 
 # scheduler_muon = cosine_decay_with_warmup(
 #     max_lr=TrainConfig.MAX_LEARNING_RATE * 10 * 2,
@@ -465,13 +505,24 @@ win_loss = sum(losses)
 # nn.quantize(model)
 
 
+def cal_kl_div(_curr_model_logits, x, pad_mask, label_weight=None):
+    ref_model_logits = ref_model(x)
+    ref_model_logits = mx.stop_gradient(nn.log_softmax(ref_model_logits, axis=-1))
+    curr_model_logits = nn.log_softmax(_curr_model_logits, axis=-1)
+    kl_div = nn.losses.kl_div_loss(inputs=curr_model_logits, targets=ref_model_logits, axis=-1, reduction="none")
+    if label_weight is not None:
+        kl_div = kl_div * label_weight
+    kl_div = (kl_div * pad_mask).sum() / mx.maximum(pad_mask.sum(), 1e-7)
+    return kl_div
+
+
 # state = [model.state, optimizer.state]
 # @partial(mx.compile, inputs=state, outputs=state)
-def cal_loss(model, x, y, weights):
+def cal_loss(model, x, y, pad_mask):
     logits = model(x)
     # Shape: (bs, ctx_len)
     tok_loss = nn.losses.cross_entropy(logits, y, reduction="none")
-    total_toks = mx.maximum(weights.sum(), 1e-7)
+    total_toks = mx.maximum(pad_mask.sum(), 1e-7)
 
     if TrainConfig.DFT_WEIGHT > 0:
         # DFT ref: https://github.com/yongliang-wu/DFT/ | https://github.com/Lauorie/DFT
@@ -480,12 +531,19 @@ def cal_loss(model, x, y, weights):
         probs_at_labels = mx.exp(mx.stop_gradient(-tok_loss))
         dft_weight = 1 #0.9  # 1
         probs_at_labels = probs_at_labels * dft_weight + (1 - dft_weight)
-        dft_loss = (tok_loss * probs_at_labels * weights).sum() / total_toks
-        return dft_loss
+        dft_loss = (tok_loss * probs_at_labels * pad_mask).sum() / total_toks
+        if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:
+            kl_div = cal_kl_div(logits, x, pad_mask, label_weight=probs_at_labels)
+            return dft_loss + TrainConfig.KL_DIV_WEIGHT * kl_div, kl_div
+        return dft_loss, mx.array(0)
     else:
-        total_toks = mx.maximum(weights.sum(), 1e-12)
-        ce_loss = (tok_loss * weights).sum() / total_toks
-        return ce_loss
+        total_toks = mx.maximum(pad_mask.sum(), 1e-12)
+        ce_loss = (tok_loss * pad_mask).sum() / total_toks
+        if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:
+            kl_div = cal_kl_div(logits, x, pad_mask)
+        else:
+            kl_div = mx.array(0)
+        return ce_loss, kl_div
 
 
 state = [model.state, optimizer.state]
@@ -493,21 +551,24 @@ state = [model.state, optimizer.state]
 def train_step(x, y, w):
     model.train()
     loss_and_grad_fn = nn.value_and_grad(model, cal_loss)
-    loss, grads = loss_and_grad_fn(model, x, y, w)
+    (loss, kl_div), grads = loss_and_grad_fn(model, x, y, w)
     clipped_grads, total_norm = optim.clip_grad_norm(grads, max_norm=1.0)
     optimizer.update(model, clipped_grads)
-    return loss
+    return loss, kl_div
 
 
 # @partial(mx.compile)
 def model_eval(tqdm_disable=False):
-    eval_loss = []
+    eval_loss, eval_kl = [], []
     model.eval()
     for eval_itr in tqdm(range(len(eval_dataset)), leave=False, disable=tqdm_disable):
         x, y, w, ctx = get_batch(eval_dataset, idx=eval_itr, batch_size=TrainConfig.BATCH_SIZE)
         # toks = w.sum().item()
-        eval_loss.append(cal_loss(model, x, y, w).item())
-    return sum(eval_loss) / len(eval_loss)
+        loss, kl = cal_loss(model, x, y, w)
+        # print(loss, kl)
+        eval_loss.append(loss.item())
+        eval_kl.append(kl.item())
+    return sum(eval_loss) / len(eval_loss), sum(eval_kl) / len(eval_kl)
 
 
 tqdm_data = tqdm(
@@ -518,7 +579,7 @@ tqdm_data = tqdm(
     # mininterval=2.5
 )
 
-eval_loss = model_eval(False)
+eval_loss, eval_kl_div = model_eval(False)
 if itr_start == 0:
     eval_losses[1] = {
         "train_loss": 0.0,
@@ -533,7 +594,8 @@ for itr in tqdm_data:
         dataset, idx=itr % len(dataset), batch_size=TrainConfig.BATCH_SIZE
     )
     toks = w.sum().item()
-    loss = train_step(x, y, w).item()
+    loss, kl_div = train_step(x, y, w)
+    loss, kl_div = loss.item(), kl_div.item()
     non_pad_toks = mx.where(x != tokenizer.pad_token_id, 1, 0).sum().item()
     mx.eval(state)
     losses.append(loss)
@@ -542,13 +604,14 @@ for itr in tqdm_data:
 
     if (itr + 1) % log_steps == 0:
         tqdm_data.set_description(
-            f"TL {total_loss / (itr + 1):1.4f}/ EL {eval_loss:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
+            f"TL {total_loss / (itr + 1):1.4f}|{kl_div:1.4f} / EL {eval_loss:1.4f}|{eval_kl_div:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
         )
         if (itr + 1) % 500 == 0:
-            eval_loss = model_eval(False)
+            eval_loss, eval_kl_div = model_eval(False)
             eval_losses[itr + 1] = {
                 "train_loss": win_loss / seen_tokens,
                 "eval_loss": eval_loss,
+                "eval_kl_div": eval_kl_div,
                 "lr": optimizer.learning_rate.item(),
             }
             save_state(
