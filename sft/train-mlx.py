@@ -5,7 +5,7 @@
 
 import json
 import os, sys
-os.environ['HF_HUB_OFFLINE'] = '1'
+# os.environ['HF_HUB_OFFLINE'] = '1'
 
 import random
 from collections import defaultdict
@@ -30,15 +30,15 @@ from utils.utils import grad_checkpoint
 class TrainConfig:
     # Base model config
     # MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct" #"quwsarohi/NanoAgent-135M"
-    MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
+    MODEL = "HuggingFaceTB/SmolLM2-135M"
     # Iterations
-    EPOCHS = 1.1
+    EPOCHS = 2.1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
     LOAD_PREV = False
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_STEPS = int(0.1 * 190203)
+    WARMUP_STEPS = int(0.1 * 194057)
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -48,10 +48,10 @@ class TrainConfig:
     SCHEDULER = 'cosine'
     WEIGHT_DECAY = 0 # 0.1
     KL_DIV_WEIGHT = 0
-    DFT_WEIGHT = 0
+    DFT_WEIGHT = 1 # 0.8 Gave good EOF token prediction -> ||||
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = None
-    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-nemotron-instruct"
+    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-nemotron-instruct-base"
 
 
 config_dict = {
@@ -70,10 +70,15 @@ if not os.path.exists(cache_mlx_path):
 
 print("Model loading from:", cache_mlx_path)
 model, tokenizer = load(cache_mlx_path)
+
+# Reference model for KL-divergence
 if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:
     ref_model, _ = load(cache_mlx_path)
     ref_model.eval().freeze()
     print("KL Divergence model loading from:", cache_mlx_path)
+else:
+    ref_model = None
+
 # model.generation_config.pad_token_id = tokenizer.pad_token_id
 # model.generation_config.eos_token_id = tokenizer.eos_token_id
 
@@ -281,12 +286,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_nemotron_instruct.jsonl",
+    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_rawtemplate.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_nemotron_instruct.jsonl",
+    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_rawtemplate.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -297,8 +302,8 @@ dataset = Dataset(
     dataset=train_ds,
     shuffle=True,
     tokenizer=tokenizer,
-    assistant_prefix="<|im_start|>assistant\n",
-    assistant_end="<|im_end|>",
+    # assistant_prefix="# assistant:\n\n", #"<|im_start|>assistant\n",
+    # assistant_end="||||", #"<|im_end|>",
     plw=0.0,
 )
 
@@ -308,8 +313,8 @@ eval_dataset = Dataset(
     dataset=test_ds,
     shuffle=False,
     tokenizer=tokenizer,
-    assistant_prefix="<|im_start|>assistant\n",
-    assistant_end="<|im_end|>",
+    # assistant_prefix="# assistant:\n\n", #"<|im_start|>assistant\n",
+    # assistant_end="||||", #"<|im_end|>",
     plw=0.0,
 )
 
@@ -529,7 +534,7 @@ def cal_loss(model, x, y, pad_mask):
         # Another implementation: memory and compute efficient
         # Ref: https://github.com/yongliang-wu/DFT/issues/5
         probs_at_labels = mx.exp(mx.stop_gradient(-tok_loss))
-        dft_weight = 1 #0.9  # 1
+        dft_weight = TrainConfig.DFT_WEIGHT #0.9  # 1
         probs_at_labels = probs_at_labels * dft_weight + (1 - dft_weight)
         dft_loss = (tok_loss * probs_at_labels * pad_mask).sum() / total_toks
         if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:

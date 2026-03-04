@@ -232,14 +232,26 @@ def dedent_markdown_python_code(markdown_text):
     return cleaned_markdown
 
 
-def filter_by_resp_len(ds, resp_lim:int):
-    def filter_fn(data):
-        for turn in data['messages']:
+def filter_by_resp_len(ds, resp_lim:int, messages_key='messages'):
+    def map_fn(data):
+        new_messages = []
+        cache_messages = []
+        for turn in data["_"+messages_key]:
             if turn['role'] == 'assistant':
                 if len(turn['content']) > resp_lim:
-                    return False
-                return True
-    ds = ds.filter(filter_fn)
+                    break
+                new_messages.extend(cache_messages + [turn])
+                cache_messages = []
+            else:
+                cache_messages.append(turn)
+        return new_messages
+    
+    
+    ds = ds.rename_column(messages_key, "_"+messages_key)
+    ds = ds.map(lambda d: {'messages': map_fn(d), **d})
+    ds = ds.filter(lambda d: len(d['messages']) > 0)
+    ds = ds.remove_columns(['_'+messages_key])
+    
     return ds
 
 
@@ -305,12 +317,13 @@ def pack_data(
         NON_PAD_TOKS = 0
         TRUNCATED_TOKS = 0
         PAD_TOKS = 0
-        TOT_TOKS = len(new_dataset) * ctx_len
+        TOT_TOKS = 0
 
         for idx, data in enumerate(new_dataset):
             TRUNCATED_TOKS += max(data["ctx_len"] - ctx_len, 0)
             NON_PAD_TOKS += data["ctx_len"]
             PAD_TOKS += max(ctx_len - data['ctx_len'], 0)
+            TOT_TOKS += data['ctx_len']
 
         print("Total tokens:          : ", TOT_TOKS)
         print("Total non-pad tokens   : ", NON_PAD_TOKS)

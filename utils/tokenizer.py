@@ -25,14 +25,25 @@ CHAT_TEMPLATE = {}
 # {% endif %}"""
 
 
+# CHAT_TEMPLATE['HuggingFaceTB'] = """{% for message in messages %}
+# {% if loop.first and messages[0]['role'] != 'system' %}
+# {{ '<|im_start|>system\nYou are a helpful AI assistant. <|im_end|>' }}
+# {% endif %}
+# {{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>'}}
+# {% endfor %}
+# {% if add_generation_prompt %}
+# {{ '<|im_start|>assistant' }}
+# {% endif %}"""
+
+
 CHAT_TEMPLATE['HuggingFaceTB'] = """{% for message in messages %}
 {% if loop.first and messages[0]['role'] != 'system' %}
-{{ '<|im_start|>system\nYou are a helpful AI assistant. <|im_end|>' }}
+{{ '# SYSTEM:\n\nYou are a helpful AI assistant.||||' }}
 {% endif %}
-{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>'}}
+{{'\n# ' + message['role']|upper + ':\n\n' + message['content'] + '||||'}}
 {% endfor %}
 {% if add_generation_prompt %}
-{{ '<|im_start|>assistant' }}
+{{ '# assistant:\n\n' }}
 {% endif %}"""
 
 
@@ -123,12 +134,15 @@ def get_tokenizer(model_path, add_bos=False):
             bos = '{{- bos_token -}}\n'
         tokenizer.chat_template = bos + CHAT_TEMPLATE['HuggingFaceTB']
         tokenizer.bos_token = "<empty_output>"
-        tokenizer.eos_token = "<|im_end|>"
+        tokenizer.eos_token = "||||" #"<|im_end|>"
         tokenizer.pad_token = "<|endoftext|>"
         tokenizer.unk_token = "<|endoftext|>"
+        
+        tokenizer.eos_token_id = 38733
         # tokenizer.padding_side = "left"
         # tokenizer.truncation_side = "left"
-        assert tokenizer.eos_token_id == 2
+        
+        assert tokenizer.eos_token_id == 38733
         assert tokenizer.pad_token_id == 0
         assert tokenizer.unk_token_id == 0
 

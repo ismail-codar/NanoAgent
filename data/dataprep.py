@@ -1032,18 +1032,17 @@ def prep_dataset(
         "default": [
             nemotron_instruct(),
             # question_decompose_db(),
-            # tulu3_persona(),
+            tulu3_persona(),
             # # TxT360_efforts_if('medium'),
             # # TxT360_efforts_if('low'),
-            # shortcodes_python(),
-            # code_feedback(),
-            # orca_agentinstruct(),
+            shortcodes_python(),
+            code_feedback(),
+            orca_agentinstruct(),
             smoltalk("systemchats-30k", tokenizer=tokenizer),
             smoltalk("everyday-conversations", tokenizer=tokenizer),
             smoltalk("systemchats-30k", tokenizer=tokenizer),
             smoltalk("everyday-conversations", tokenizer=tokenizer),
-            # openorca_math(),
-            
+            openorca_math(),
         ],
         "fcall": [
             # smoltalk_fcall(),
@@ -1098,7 +1097,10 @@ def prep_dataset(
     #     )
     # )
     # print("After remove code:\n", dataset_full)
-
+    
+    if max_resp_len:
+        dataset_full = filter_by_resp_len(dataset_full, max_resp_len)
+    
     dataset_full = dataset_full.map(
         lambda data: {
             **data,
@@ -1107,9 +1109,6 @@ def prep_dataset(
             ),
         }
     )
-    
-    if max_resp_len:
-        dataset_full = filter_by_resp_len(dataset_full, max_resp_len)
     
     # Tokenizing and context len cal
     dataset_full = dataset_full.map(
@@ -1131,12 +1130,6 @@ def prep_dataset(
         semhash = SemHash.from_records(records=dataset_full, columns=["conversations"])
         rep_result = semhash.self_find_representative(selection_size=selection_size)
         dataset_full = Dataset.from_list(rep_result.selected)
-
-    # if pack:
-    #     dataset_full = dataset_full.shuffle(seed=seed)
-    #     dataset_full = pack_data(dataset_full, ctx_len=context_len + 256 if context_len is not None else 1024*8)
-    #     dataset_full = dataset_full.shuffle(seed=seed)
-    #     print("After pack:", dataset_full)
 
     return dataset_full
 
@@ -1161,11 +1154,11 @@ if __name__ == "__main__":
     # General
     phase1 = prep_dataset(
         phase="default",
-        context_len=1024*6,
+        context_len=1024*8,
         tokenizer=tokenizer,
         seed=123,
         # dedupe_threshold=0.95,
-        # max_resp_len=1024*2,
+        max_resp_len=384*4,
     )
     
 
@@ -1182,6 +1175,6 @@ if __name__ == "__main__":
     for stage, dataset in [("train", train_ds), ("test", test_ds)]:
         source_dist(dataset)
         print(f"Total {stage} dataset length:", len(dataset), flush=True)
-        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_nemotron_agentic.jsonl"
+        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_nemotron_instruct_rawtemplate.jsonl"
         print("Save path:", save_path, flush=True)
         dataset.to_json(save_path, orient="records")
