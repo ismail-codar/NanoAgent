@@ -7,7 +7,7 @@
 
 import json
 import os
-os.environ['HF_HUB_OFFLINE'] = '1'
+# os.environ['HF_HUB_OFFLINE'] = '1'
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -32,7 +32,7 @@ from mlx.utils import tree_flatten, tree_unflatten, tree_map
 from mlx_lm import batch_generate, generate, stream_generate, load, convert
 from mlx_lm.utils import load_model, save_model, dequantize_model
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
-# from data.grpo.salseforce_tool import salesfores_toolcall
+from data.grpo.salseforce_tool import salesfores_toolcall
 
 from data.grpo.websearch_tool import tool_calling_traces
 from data.grpo.mobile_actions import mobileactions
@@ -63,42 +63,40 @@ class TrainConfig:
     GEN_LEN = 256 + 128
     SAVE_FREQ = 50
     LOAD_PREV = False
-    LEARNING_RATE = 1e-5
-    WEIGHT_DECAY = 0
-    EPSILON_MIN = 3e-3    # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
-    EPSILON_HIGH = 4e-3   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
+    LEARNING_RATE = 1e-7
+    WEIGHT_DECAY = 0.2
+    EPSILON_MIN = 0.2    # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
+    EPSILON_HIGH = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
     GROUP_SIZE = 8
     WARMUP_STEPS = 50 # 50
     DECAY_STEPS = 40 # 10
-    BETA = 0.04 # 0.04
+    BETA = 0 # 0.04
     EVAL_STEPS = 50
     NUM_MODEL_UPDATE_MU = 1   # Number of backpropagations per question/rollout
     GRAD_ACCUM = 1
-    GRAD_NORM = 1
+    GRAD_NORM = 1/64
     REF_MODEL_MIXUP_ALPHA = 0 # 0.6
-    MAX_INPUT_LEN = 256 # 768
+    MAX_INPUT_LEN = 512 # 256 # 768
     SAVE_PATH = "weights/NanoAgent-135M-grpo-ifeval"
     DATA_PATH = "data/datasets/grpo_cache.pickle"
-    MODEL = "quwsarohi/NanoAgent-135M-think" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
+    MODEL = "weights/NanoAgent-135M-nemotron-sft" #"quwsarohi/NanoAgent-135M-think" #"weights/SmolLM2-360M-mlx-Instruct" #"quwsarohi/NanoAgent-135M"
     FREEZE_LAYERS = [] # embed_tokens
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = 6
     EVAL_SAMPLES = 100
     TQDM = True
     STD_NORM = False
-    CONST_TOK_SCALE = False
-    SAMPLING = 'custom' #'sequence'
+    SAMPLING = 'token' #'sequence'
     SOFT_CLIP = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
     TEMPERATURE = 0.8 # Better to keep <= 0.9
     MIN_P = None # Expected ~0.2 for Smollm2-135M
     TOP_K = None
     TOP_P = 0.9
-    REPETITION_PENALTY = 1.1 # ~1.1
+    REPETITION_PENALTY = 1.05 # ~1.1
 
 # GSPO Constraints:
 # -----------------
 # STD_NORM = True
-# CONST_TOK_SCALE = False
 # SOFT_CLIP = False
 # EPSILON_MIN = 3e-3  (minimum value that updates logprob) # Sequence/GSPO: 3e-4
 # EPSILON_HIGH = 4e-3 (minimum value that updates logprob) # Sequence/GSPO: 4e-4
@@ -107,7 +105,6 @@ class TrainConfig:
 # DR GRPO Constraints:
 # --------------------
 # STD_NORM = False
-# CONST_TOK_SCALE = True
 # SOFT_CLIP = False
 # EPSILON_MIN = 0.2
 # EPSILON_HIGH = 0.272
@@ -116,7 +113,6 @@ class TrainConfig:
 # SAPO Constraints:
 # -----------------
 # STD_NORM = False
-# CONST_TOK_SCALE = True
 # SOFT_CLIP = True [main constraint]
 # EPSILON_MIN = 0.2 [unused]
 # EPSILON_HIGH = 0.272 [unused]
@@ -209,9 +205,9 @@ scheduler_muon = linear_decay_with_warmup(
     decay_steps=TrainConfig.DECAY_STEPS
 )
 
-# optimizer = optim.AdamW(
-#     learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
-# )
+optimizer = optim.AdamW(
+    learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+)
 
 # Interesting writings:
 # * https://huggingface.co/blog/onekq/muon-optimizer
@@ -220,18 +216,18 @@ scheduler_muon = linear_decay_with_warmup(
 # * https://varunneal.github.io/essays/muon
 # * https://github.com/KellerJordan/Muon
 
-optimizer = optim.MultiOptimizer(
-    [        
-        optim.Muon(
-            learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
-        ),
-        optim.AdamW(
-            learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
-        )
-    ],
-    # Where muon will be applied
-    [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
-)
+# optimizer = optim.MultiOptimizer(
+#     [        
+#         optim.Muon(
+#             learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
+#         ),
+#         optim.AdamW(
+#             learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+#         )
+#     ],
+#     # Where muon will be applied
+#     [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
+# )
 
 def total_tokens(data):
     return len(
@@ -254,34 +250,36 @@ if TrainConfig.GENERATE_DATA:
     # sz = int(ds_size * 0.4)
     # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
     # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
-    sz = int(ds_size * 0.6)
+    sz = int(ds_size * 1.0)
     train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
     # sz = int(ds_size * 0.4)
-    train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
+    # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
     # random.shuffle(train_ds)
     # train_ds = train_ds[:sz]
     # print("IF-Eval DS size:", len(train_ds))
 
     
     # --- Tool Call ---
-    # sz = int(ds_size * 0.5)
+    sz = int(ds_size * 1)
+    train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=True, k_shot=False)
+    # sz = int(ds_size * 0.25)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
-    # sz = int(ds_size * 0.025)
+    # sz = int(ds_size * 0.05)
     # train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
 
     # --- Math Mix ---
-    # sz = int(ds_size * 0.25)
-    # train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.1)
-    # train_ds += syllogism(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.3)
-    # train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.15)
-    # train_ds += chain_sum(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.1)
-    # train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.1)
-    # train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
+    sz = int(ds_size * 0.25)
+    train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.1)
+    train_ds += syllogism(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.3)
+    train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.15)
+    train_ds += chain_sum(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.1)
+    train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.1)
+    train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
     
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
@@ -587,22 +585,16 @@ def grpo_loss_fn(
     # Get log probs from the trainable model (π_θ)
     logprobs, pad_mask = calculate_log_probs(model, io_toks, a_toks, pad_tok_id)
     # Get log probs from the old non-trainable model (π_θ_old)
+    # If we are backpropagating only once, old_logprobs would be same as logprobs
+    # if TrainConfig.NUM_MODEL_UPDATE_MU == 1:
+        # old_logprobs = mx.stop_gradient(logprobs)
 
     # PPO-clip objective
     # Ratio is converted from log values using exp(log)
-    if TrainConfig.SAMPLING == 'sequence':
-        # GSPO Equation: https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide/gspo-reinforcement-learning?q=learning+rage
-        ratio = ((logprobs - old_logprobs) * pad_mask).sum(axis=-1) / pad_mask.sum(axis=-1)
-        ratio = mx.exp(ratio)
-        if not TrainConfig.SOFT_CLIP:
-            clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
-            token_policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages)
-        else:
-            token_policy_reward = soft_gate(ratio, advantages) * advantages
-        # token_policy_reward.shape: (G, )
-    elif TrainConfig.SAMPLING == 'token':
+    if TrainConfig.SAMPLING == 'token':
         # DAPO - Decoupled Clip and Dynamic sAmpling Policy Optimization: https://arxiv.org/pdf/2503.14476
-        ratio = mx.exp(logprobs - old_logprobs)
+        # ratio = mx.exp(logprobs - mx.array(old_logprobs))
+        ratio = mx.exp(logprobs)
         advantages = mx.expand_dims(advantages, axis=1)
         # DAPO
         if not TrainConfig.SOFT_CLIP:
@@ -643,7 +635,13 @@ def grpo_loss_fn(
             token_policy_reward = token_policy_reward - beta * kl_div
 
     # The objective is to maximize this, so we return the negative for minimization
-    return -1 * (token_policy_reward.mean(axis=0))
+    if TrainConfig.SAMPLING == 'token':
+        # DAPO Implementation; Ref: https://rlhfbook.com/c/06-policy-gradients
+        token_policy_reward = token_policy_reward.sum() / pad_mask.sum()
+    elif TrainConfig.SAMPLING == 'custom':
+        token_policy_reward = token_policy_reward.sum() # token_policy_reward.mean(axis=0)
+    
+    return -1 * (token_policy_reward)
 
 
 # Pad sequences to the same length
@@ -670,7 +668,7 @@ def pad_sequences(sequences, pad_token_id):
 
 
 
-def rollout_batch(prompt, scorer, tokenizer, model, group_size):
+def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling=False):
     model.eval()
     prompt_tokens = tokenizer.encode(prompt)
     sampler = make_sampler(
@@ -689,8 +687,12 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         logits_processors = None
     
     rollout_tokens, rollout_rewards, rollout_a_toks, rollout_logprobs = [], [], [], []
+    max_sample_step = group_size
+    if dynamic_sampling:
+        max_sample_step *= 3
+    
     # Generate responses/rollouts
-    for gitr in range(int(group_size * 1)):
+    for gitr in range(max_sample_step):
         response_text = ""
         response_tokens = []
         response_logprob = []
@@ -715,6 +717,9 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         else:
             reward = float(scorer(response_text, False))
             # response_tokens.append(tokenizer.eos_token_id)
+        
+        if dynamic_sampling and not (0 <= reward < 1):
+            continue
 
         # Take the logprobs only of the response tokens
         response_tokens = mx.array(response_tokens)
@@ -724,17 +729,21 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
         rollout_rewards.append(reward)
         rollout_a_toks.append(mx.array(response_tokens))
         rollout_logprobs.append(response_logprob)
+        
+        if len(rollout_rewards) == group_size:
+            break
+    
 
     # Length based reward
-    n_tokens = [len(toks) for toks in rollout_a_toks]
-    max_tokens = max(n_tokens)
-    for idx in range(len(rollout_rewards)):
-        if rollout_rewards[idx] <= 0: continue
-        len_norm = n_tokens[idx] / max_tokens
-        rollout_rewards[idx] = 0.8 * rollout_rewards[idx] + 0.2 * len_norm
+    # n_tokens = [len(toks) for toks in rollout_a_toks]
+    # max_tokens = max(n_tokens)
+    # for idx in range(len(rollout_rewards)):
+    #     if rollout_rewards[idx] <= 0: continue
+    #     len_norm = n_tokens[idx] / max_tokens
+    #     rollout_rewards[idx] = 0.8 * rollout_rewards[idx] + 0.2 * len_norm
 
     # rollout_rewards = min_max_norm(rollout_rewards)
-    if rollout_rewards:
+    if rollout_rewards and max(rollout_rewards) > 0:
         rrewards = mx.array(rollout_rewards)
         mean_reward = mx.mean(rrewards)
         std_reward = mx.sqrt(mx.var(rrewards))
@@ -743,6 +752,7 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size):
             advantages = advantages / (std_reward + 1e-12)  # Add epsilon for stability
     else:
         advantages = mx.array([])
+        rollout_rewards = []
 
     return rollout_tokens, rollout_a_toks, rollout_logprobs, rollout_rewards, advantages
     
@@ -879,7 +889,7 @@ def grpo_train_loop(
 
         rollout_tokens_padded = pad_sequences(rollout_tokens, tokenizer.pad_token_id)
         rollout_a_toks_padded = pad_sequences(rollout_a_toks, tokenizer.pad_token_id)
-        rollout_logprobs = pad_sequences(rollout_logprobs, -100)
+        # rollout_logprobs = pad_sequences(rollout_logprobs, -100)
 
         # Optimization Step
         _loss = 0

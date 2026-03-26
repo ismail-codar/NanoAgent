@@ -218,7 +218,7 @@ def function_calling_chatml():
                         tool_call = [tool_call]
                     content = json.dumps(tool_call)
                     called_map[tool_call[0]["name"]] += 1
-                    content = f"<tool_call>{content}</tool_call>"
+                    content = f"```json\n{content}\n```"
                     all_good = called_map[tool_call[0]["name"]] <= 500
                 except:
                     content = ""
@@ -483,7 +483,7 @@ def TxT360_efforts_toolcall():
                     sanitized_tool_calls = json.dumps(tool_calls, indent=None)
                     seq.append({
                         'role': 'assistant',
-                        'content': f"{think.strip()}\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
+                        'content': f"{think.strip()}\n\n```json\n{sanitized_tool_calls}\n```"
                     })
                 else:
                     seq.append({
@@ -583,7 +583,7 @@ def hermes_fc_thinking():
                     sanitized_tool_calls = json.dumps(sanitized_tool_calls, indent=None)
                     think = f"\n{think[0].strip()}\n" if len(think[0].strip()) > 0 else "\n"
                     seq[-1]["content"] = (
-                        f"<think>{think}</think>\n\n<tool_call>{sanitized_tool_calls}</tool_call>"
+                        f"<think>{think}</think>\n\n```json\n{sanitized_tool_calls}\n```"
                     )
                 else:
                     seq[-1]["content"] = f"<think>\n</think>\n\n{seq[-1]['content']}"
@@ -659,7 +659,7 @@ def smoltalk_fcall(sys_template, n_data=None):
                     seq.append(
                         {
                             "role": "assistant",
-                            "content": f"<tool_call>{tool_calls}</tool_call>",
+                            "content": f"```json\n{tool_calls}\n```",
                         }
                     )
                 else:
@@ -698,8 +698,8 @@ def orca_agentinstruct():
     ds = load_dataset("mlabonne/orca-agentinstruct-1M-v1-cleaned")["train"]
     ds = ds.filter(
         lambda d: d["split"]
-        # in ['rag', 'text_extraction', 'text_classification', 'struct2text_flow']
-        not in ["creative_content", "fermi", "open_domain_qa", "code_"]
+        in ['rag', 'text_extraction', 'struct2text_flow', 'text_modification']
+        # not in ["creative_content", "fermi", "open_domain_qa", "code_"]
     )
     ds = ds.map(
         lambda d: {"source": f"mlabonne/orca-agentinstruct-1M-v1-cleaned/{d['split']}"}
@@ -807,7 +807,7 @@ def salesfores_tool_ds():
                 "content": TOOL_TEMPLATE.format(tools=tool_shuffle(tools)),
             },
             {"role": "user", "content": data["query"]},
-            {"role": "assistant", "content": f"<tool_call>{tool_calls}</tool_call>"},
+            {"role": "assistant", "content": f"```json\n{tool_calls}\n```"},
         ]
         return {
             "messages": seq,
@@ -870,7 +870,7 @@ def tool_calling_traces():
                 messages.append(
                     {
                         "role": "assistant",
-                        "content": f"<think>{think.strip()}</think>\n\n<tool_call>{tool_calls}</tool_call>",
+                        "content": f"<think>{think.strip()}</think>\n\n```json\n{tool_calls}\n```",
                     }
                 )
             elif turn["role"] == "tool":
@@ -981,7 +981,7 @@ def nemotron_agentic(tool_limit=6):
                     tool_calls = json.dumps(tool_calls, indent=None)
                     reasoning = turn.get('reasoning_content', '')
                     if reasoning: reasoning += "\n\n"
-                    messages.append({"role": role, 'content': f"{reasoning}<tool_call>{tool_calls}</tool_call>"})
+                    messages.append({"role": role, 'content': f"{reasoning}```json\n{tool_calls}\n```"})
                 else:
                     messages.append({'role': role, 'content': content.strip()})
             elif role == 'tool':
@@ -1011,7 +1011,7 @@ def nemotron_agentic(tool_limit=6):
     with open('data/datasets/nemotron/tool_calling.jsonl', 'r') as f:
         for l in f:
             train_ds.append(json.loads(l))
-            if len(train_ds) > 500_000: break
+            if len(train_ds) > 600_000: break
     with open('data/datasets/nemotron/interactive_agent.jsonl', 'r') as f:
         for l in f:
             train_ds.append(json.loads(l))
@@ -1049,9 +1049,9 @@ def prep_dataset(
             # smoltalk_fcall(),
             # hermes_fc_thinking(),
             function_calling_chatml(),
-            # salesfores_tool_ds(),
+            salesfores_tool_ds(),
             # # tool_calling_traces(),
-            TxT360_efforts_toolcall(),
+            # TxT360_efforts_toolcall(),
             # codeact(),
             nemotron_agentic()
         ],
@@ -1144,14 +1144,14 @@ if __name__ == "__main__":
 
     tokenizer = get_tokenizer(TOKENIZER_PATH, add_bos=False)
     # Function-call
-    # phase2 = prep_dataset(
-    #     phase="fcall",
-    #     # context_len=CONTEXT_LEN,
-    #     tokenizer=tokenizer,
-    #     seed=123,
-    #     # dedupe_threshold=0.999,
-    #     max_resp_len=512 * 3,
-    # )
+    phase2 = prep_dataset(
+        phase="fcall",
+        # context_len=CONTEXT_LEN,
+        tokenizer=tokenizer,
+        seed=123,
+        # dedupe_threshold=0.999,
+        max_resp_len=512 * 3,
+    )
     # General
     phase1 = prep_dataset(
         phase="default",
@@ -1163,8 +1163,8 @@ if __name__ == "__main__":
     )
     
 
-    # train_ds = concatenate_datasets([phase1, phase2]).shuffle(42)
-    train_ds = phase1.shuffle(42)
+    train_ds = concatenate_datasets([phase1, phase2]).shuffle(42)
+    # train_ds = phase1.shuffle(42)
     train_ds = pack_data(train_ds, ctx_len=CONTEXT_LEN, sort=False, segment_size=256, report=True)
     print("After pack:", train_ds)
 
@@ -1176,6 +1176,6 @@ if __name__ == "__main__":
     for stage, dataset in [("train", train_ds), ("test", test_ds)]:
         source_dist(dataset)
         print(f"Total {stage} dataset length:", len(dataset), flush=True)
-        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_nemotron_instruct_base.jsonl"
+        save_path = f"data/datasets/Smollm2_base_{stage}_{CONTEXT_LEN}_nemotron_instruct_fc_base.jsonl"
         print("Save path:", save_path, flush=True)
         dataset.to_json(save_path, orient="records")

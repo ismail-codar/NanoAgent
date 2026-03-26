@@ -5,7 +5,8 @@ model_args:
   # pretrained: google/gemma-3-270m-it #
   # pretrained: weights/NanoAgent-135M-grpo-hilr
   # pretrained: HuggingFaceTB/SmolLM2-135M-Instruct
-  pretrained: weights/NanoAgent-135M-test-v2
+  # pretrained: weights/NanoAgent-135M-test-v2
+  pretrained: weights/SmolLM2-135M-Instruct-nemotron-instruct-fc-instruct-sft/final_checkpoint
   dtype: bfloat16
   tie_word_embeddings: true
   low_cpu_mem_usage: true
@@ -21,7 +22,7 @@ gen_kwargs:
 tasks:
   - ifeval
   - commonsense_qa
-  # - tinyBenchmarks
+  - tinyBenchmarks
 
 # num_fewshot: 5
 batch_size: 1

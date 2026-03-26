@@ -5,7 +5,8 @@ from functools import partial
 import random
 
 from utils.tokenizer import TOOL_TEMPLATE
-from utils.webtool import tool_call_extract
+# from utils.webtool import tool_call_extract
+from data.utils import tool_parse
 from data.utils import THINK_STRINGS
 
 import ollama
@@ -101,6 +102,20 @@ def get_llm_response(messages, think=False, n_tokens=2):
     return ret.message.thinking, ret.message.content
 
 
+# def validate_format(text):
+#     """
+#     Validate if the text strictly follows the pattern:
+#     <think> ... </think><tool_call> ... </tool_call>
+
+#     Returns True if the string matches the pattern, False otherwise.
+#     """
+#     pattern = re.compile(
+#         r"^.*?\s*```json\s.*?\s```$", re.DOTALL
+#     )
+#     return bool(pattern.match(text)) \
+#         and (text.count("```json\n") == 1) \
+#         and (text.count("\n```") == 1)
+
 def validate_format(text):
     """
     Validate if the text strictly follows the pattern:
@@ -109,12 +124,11 @@ def validate_format(text):
     Returns True if the string matches the pattern, False otherwise.
     """
     pattern = re.compile(
-        r"^<think>.*?</think>\s*<tool_call>.*?</tool_call>$", re.DOTALL
+        r"^\s*\S[\s\S]*?```json\s.*?\s```$", re.DOTALL
     )
     return bool(pattern.match(text)) \
-        and (text.count("</think>") == 1) \
-        and (text.count("<tool_call>") == 1) \
-        and (text.count("</tool_call>") == 1)
+        and (text.count("```json\n") == 1) \
+        and (text.count("```") == 2)
 
 
 def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
@@ -123,6 +137,35 @@ def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
     except Exception as E:
         print("Exception:", E, '| Input:', llm_gen, '| Ground:', tools_ground)
         return 0, None
+
+
+# def tool_call_extract(inp_str: str):
+#     """
+#     Extracts tool call from format:
+#     <tool_call>
+#     JSON tool call
+#     </tool call>
+#     """
+#     pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+#     tool_calls = pattern.findall(inp_str)
+#     if tool_calls:
+#         tool_call = tool_parse(tool_calls[0])
+#         return tool_call
+#     return None
+
+def tool_call_extract(inp_str: str):
+    """
+    Extracts tool call from format:
+    ```json
+    JSON tool call
+    ```
+    """
+    pattern = re.compile(r"```json\s(.*?)```", re.DOTALL)
+    tool_calls = pattern.findall(inp_str)
+    if tool_calls:
+        tool_call = tool_parse(tool_calls[0])
+        return tool_call
+    return None
 
 
 def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
@@ -152,6 +195,12 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     # -2: Major mistakes -> Wrong format | imaginary tools | invalid tool call signature
     # -1: Minor mistakes -> wrong arguments | 
 
+    a = str(tools_gen)
+    b = str(tools_ground)
+
+    if uniform(a) == uniform(b):
+        return 1, tools_gen
+    
     for tool in tools_gen:
         # Invalid tool calling format
         if not isinstance(tool, dict):
@@ -180,16 +229,10 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
                 # print(param_name, 'missing in', llm_gen)
                 total_score += -0.05
 
-    a = str(tools_gen)
-    b = str(tools_ground)
-
-    if uniform(a) == uniform(b):
-        return 1, tools_gen
-
-    s = SequenceMatcher(None, a, b)
-    seq_match = (s.find_longest_match().size / len(b))
+    # s = SequenceMatcher(None, a, b)
+    # seq_match = (s.find_longest_match().size / len(b))
     total_score += (sum(args_score) / len(args_score))
-    total_score = seq_match * 0.25 + max(total_score, 0) * 0.75
+    # total_score = seq_match * 0.25 + max(total_score, 0) * 0.75
     return max(min(total_score, 1), 0), tools_gen
 
 

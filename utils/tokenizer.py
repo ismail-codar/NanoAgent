@@ -25,26 +25,27 @@ CHAT_TEMPLATE = {}
 # {% endif %}"""
 
 
-# CHAT_TEMPLATE['HuggingFaceTB'] = """{% for message in messages %}
-# {% if loop.first and messages[0]['role'] != 'system' %}
-# {{ '<|im_start|>system\nYou are a helpful AI assistant. <|im_end|>' }}
-# {% endif %}
-# {{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>'}}
-# {% endfor %}
-# {% if add_generation_prompt %}
-# {{ '<|im_start|>assistant' }}
-# {% endif %}"""
-
-
 CHAT_TEMPLATE['HuggingFaceTB'] = """{% for message in messages %}
 {% if loop.first and messages[0]['role'] != 'system' %}
-{{ '\n# system:\nYou are a helpful AI assistant.||||' }}
+{{ '<|im_start|>system\nYou are a helpful AI assistant.<|im_end|>' }}
 {% endif %}
-{{'\n# ' + message['role'] + ':\n' + message['content'] + '||||'}}
+{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>'}}
 {% endfor %}
 {% if add_generation_prompt %}
-{{ '\n# assistant:' }}
+{{ '<|im_start|>assistant' }}
 {% endif %}"""
+
+
+# Alpaca style prompt template
+# CHAT_TEMPLATE['HuggingFaceTB'] = """{% for message in messages %}
+# {% if loop.first and messages[0]['role'] != 'system' %}
+# {{ '### system:\nYou are a helpful AI assistant.<|im_end|>' }}
+# {% endif %}
+# {{'### ' + message['role'] + ':\n' + message['content'] + '<|im_end|>'}}
+# {% endfor %}
+# {% if add_generation_prompt %}
+# {{ '### assistant:' }}
+# {% endif %}"""
 
 
 CHAT_TEMPLATE['SmallDoge'] = """<|begin_of_text|>{% for message in messages %}
@@ -93,13 +94,26 @@ Produce the desired function calls inside a single python script."""
     return random.choice(prompts)
 
 
-TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools> </tools> tags. 
-Based on question, you may need to make one or more function/tool calls to answer user.
+# TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools> </tools> tags. 
+# Based on question, you may need to make one or more function/tool calls to answer user.
 
-You have access to the following tools/functions:
-<tools>{tools}</tools>
+# You have access to the following tools/functions:
+# <tools>{tools}</tools>
 
-For each function call, return a JSON list object with function name and arguments within <tool_call> </tool_call> tags."""
+# For each function call, return a JSON list object with function name and arguments within <tool_call> </tool_call> tags."""
+
+TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible tools that you can execute to retrieve information or to perform specific actions. You can execute zero or more tools to answer user question.
+
+Here are the list of tools that you have access to:
+```json
+{tools}
+```
+
+Only execute tools from above. Follow the below JSON signature to execute tools:
+```json
+[{{"name": "tool_name", "arguments": {{"arg1": "val1", ...}}}}, ...]
+```
+"""
 
 
 def get_tokenizer(model_path, add_bos=False):
@@ -134,15 +148,15 @@ def get_tokenizer(model_path, add_bos=False):
             bos = '{{- bos_token -}}\n'
         tokenizer.chat_template = bos + CHAT_TEMPLATE['HuggingFaceTB']
         tokenizer.bos_token = "<empty_output>"
-        tokenizer.eos_token = "||||" #"<|im_end|>"
+        tokenizer.eos_token = "<|im_end|>"
         tokenizer.pad_token = "<|endoftext|>"
         tokenizer.unk_token = "<|endoftext|>"
         
-        tokenizer.eos_token_id = 38733
+        tokenizer.eos_token_id = 2 #38733
         # tokenizer.padding_side = "left"
         # tokenizer.truncation_side = "left"
         
-        assert tokenizer.eos_token_id == 38733
+        assert tokenizer.eos_token_id == 2 #38733
         assert tokenizer.pad_token_id == 0
         assert tokenizer.unk_token_id == 0
 

@@ -79,7 +79,7 @@ def mobileactions(tokenizer, prompt_token_len):
 from .verifiers import validate_format, tool_scorer, thinking_validate
 
 
-def scorer(llm_gen, tools_ground, def_tools):
+def scorer(llm_gen, llm_judge, tools_ground, def_tools):
     # Adding think tag (prefilled in dataset)
     # Tool score
     # llm_gen = "<tool_call>" + llm_gen

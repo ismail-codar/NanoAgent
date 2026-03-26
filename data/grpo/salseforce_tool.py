@@ -48,7 +48,7 @@ k_shot_example = [
     },
 ]
 
-def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio=0.995, think=False, k_shot=False):
+def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inputs=4, dedupe_ratio=None, think=False, k_shot=False):
     
     apply_chat_template = lambda seq: tokenizer.apply_chat_template(
                 seq,
@@ -74,7 +74,7 @@ def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inpu
             {"role": "user", "content": data["query"]},
         ]
         if think:
-            seq.append({"role": "assistant", "content": "<think>"})
+            seq.append({"role": "assistant", "content": "Okay,"})
         
         return {
             "prompt": apply_chat_template(seq),
@@ -87,9 +87,11 @@ def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inpu
 
     train_ds = load_dataset("Salesforce/xlam-function-calling-60k")["train"]
     train_ds = list(filter(lambda x: 0 < len(x["ground_tool_call"]) <= n_tool_calls and 1 < x["num_input_tools"] <= n_tool_inputs, map(mapper, train_ds)))
-    semhash = SemHash.from_records(train_ds, columns=['prompt'], use_ann=False)
-    train_ds = semhash.self_deduplicate(threshold=dedupe_ratio)
-    train_ds = train_ds.selected
+    
+    if dedupe_ratio: # 0.995
+        semhash = SemHash.from_records(train_ds, columns=['prompt'], use_ann=False)
+        train_ds = semhash.self_deduplicate(threshold=dedupe_ratio)
+        train_ds = train_ds.selected
 
     train_ds = list(filter(lambda x: len(tokenizer.encode(x['prompt'])) <= prompt_token_len, train_ds))
 
@@ -113,10 +115,10 @@ def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inpu
 from .verifiers import validate_format, tool_scorer, thinking_validate
 
 
-def scorer(llm_gen, tools_ground, def_tools, think=True):
+def scorer(llm_gen, llm_judge, tools_ground, def_tools, think):
     # Adding think tag (prefilled in dataset)
     if think:
-        llm_gen = "<think>" + llm_gen
+        # llm_gen = "<think>" + llm_gen
         # Validate format
         valid_format = validate_format(llm_gen)
         # print("Invalid format:", llm_gen, flush=True)
@@ -130,9 +132,10 @@ def scorer(llm_gen, tools_ground, def_tools, think=True):
     
     if tool_score <= 0:
         return tool_score
-
+    
+    think_score = 0
     # think_score = thinking_scorer(llm_gen, tools_gen, def_tools)
-    think_score = int(thinking_validate(llm_gen))
+    # think_score = int(thinking_validate(llm_gen))
     # if think_score <= 0:
         # print("Invalid thinking", flush=True)
         # return tool_score

@@ -29,16 +29,16 @@ from utils.utils import grad_checkpoint
 @dataclass
 class TrainConfig:
     # Base model config
-    # MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct" #"quwsarohi/NanoAgent-135M"
-    MODEL = "HuggingFaceTB/SmolLM2-135M"
+    MODEL = "HuggingFaceTB/SmolLM2-135M" #"quwsarohi/NanoAgent-135M"
+    # MODEL = "HuggingFaceTB/SmolLM2-135M"
     # Iterations
-    EPOCHS = 2.1
+    EPOCHS = 1
     BATCH_SIZE = 1
     CONTEXT_LEN = 1024 * 2
-    LOAD_PREV = False
+    LOAD_PREV = True
     # Learning rate
     MIN_LEARNING_RATE = 0  # 5e-8
-    WARMUP_RATIO = 0.1
+    WARMUP_RATIO = 0.05
     # SQRT Scaling rule: lr_new = lr * batch_scale = 3e-3 * sqrt(1/128) = ~2.5e-04
     # Ref:
     # * On the SDEs and Scaling Rules for Adaptive Gradient Algorithms
@@ -48,10 +48,10 @@ class TrainConfig:
     SCHEDULER = 'cosine'
     WEIGHT_DECAY = 0
     KL_DIV_WEIGHT = 0
-    DFT_WEIGHT = 1 # 0.8 Gave good EOF token prediction -> ||||
+    DFT_WEIGHT = 0.7
     QUANTIZATION = None
     GRADIENT_CHECKPOINT_LAYERS = None
-    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-nemotron-instruct-base"
+    SAVE_PATH = f"weights/{MODEL.split('/')[-1]}-nemotron-instruct-fc-base-dft"
 
 
 config_dict = {
@@ -59,7 +59,15 @@ config_dict = {
     for k, v in TrainConfig.__dict__.items()
     if not k.startswith("__") and not callable(v)
 }
+
 print(json.dumps(config_dict, indent=2))
+
+
+if TrainConfig.DFT_WEIGHT > 0:
+    assert TrainConfig.SAVE_PATH.endswith("dft")
+if TrainConfig.DFT_WEIGHT == 0:
+    assert TrainConfig.SAVE_PATH.endswith("sft")
+
 
 cache_mlx_path = os.path.join('weights', TrainConfig.MODEL.split('/')[-1])
 if not os.path.exists(cache_mlx_path):
@@ -88,6 +96,14 @@ if TrainConfig.QUANTIZATION is not None:
     print(f"Model quantized to {TrainConfig.QUANTIZATION} bits")
 model.train()
 tokenizer = get_tokenizer(TrainConfig.MODEL, add_bos=False)
+
+
+print("\n\nPrompt Template:")
+print(tokenizer.chat_template)
+print("---")
+print("EOS Token ID:", tokenizer.eos_token_id)
+print("PAD Token ID:", tokenizer.pad_token_id)
+print("---\n\n")
 
 
 # Gradient checkpointing: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tuner/trainer.py
@@ -286,12 +302,12 @@ def source_dist(dataset):
 
 train_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_base.jsonl",
+    data_files=f"data/datasets/Smollm2_base_train_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_fc_base.jsonl",
     split="train",
 )
 test_ds = load_dataset(
     "json",
-    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_base.jsonl",
+    data_files=f"data/datasets/Smollm2_base_test_{TrainConfig.CONTEXT_LEN}_nemotron_instruct_fc_base.jsonl",
     split="train",
 )
 # dataset = dataset.sort('ctx_len')
@@ -302,8 +318,8 @@ dataset = Dataset(
     dataset=train_ds,
     shuffle=True,
     tokenizer=tokenizer,
-    # assistant_prefix="# assistant:", #"<|im_start|>assistant\n",
-    # assistant_end="||||", #"<|im_end|>",
+    assistant_prefix="<|im_start|>assistant",
+    assistant_end="<|im_end|>",
     plw=0.0,
 )
 
@@ -313,8 +329,8 @@ eval_dataset = Dataset(
     dataset=test_ds,
     shuffle=False,
     tokenizer=tokenizer,
-    # assistant_prefix="# assistant:", #"<|im_start|>assistant\n",
-    # assistant_end="||||", #"<|im_end|>",
+    assistant_prefix="<|im_start|>assistant",
+    assistant_end="<|im_end|>",
     plw=0.0,
 )
 
@@ -363,6 +379,27 @@ def cosine_decay_with_warmup(
         )
 
     return schedule
+    
+
+# This function linearly increases DFT weight from <= 1.0 to 1.0
+def linear_to_one(step: int, total_steps: int, start: float = 0.0) -> float:
+    """
+    Linearly increase a value from `start` (<= 1.0) to 1.0.
+
+    Args:
+        step: Current step (0-based).
+        total_steps: Number of steps required to reach 1.0.
+        start: Starting value (must be <= 1.0).
+
+    Returns:
+        Float value linearly interpolated between start and 1.0.
+    """
+    assert start <= 1.0, "start must be <= 1.0"
+    assert total_steps > 0, "total_steps must be > 0"
+
+    # Linear interpolation
+    progress = min(step / total_steps, 1.0)
+    return start + (1.0 - start) * progress
 
 
 if TrainConfig.SCHEDULER == 'cosine':
@@ -423,7 +460,7 @@ def get_batch(dataset, idx=1, batch_size=1):
     return mx.concatenate(x), mx.concatenate(y), mx.concatenate(w), ctx
 
 
-# x, y, w = get_batch(10)
+# x, y, w, ctx = get_batch(dataset, idx=2)
 # x = x.tolist()[0]
 # y = y.tolist()[0]
 # w = w.tolist()[0]
@@ -431,15 +468,22 @@ def get_batch(dataset, idx=1, batch_size=1):
 # inp = ''
 # tar = ''
 # for i in range(1024):
-#     if w[i] == 0:
-#         inp += '*'
-#     else:
-#         inp += tokenizer.decode(x[i])
-#     tar += tokenizer.decode(y[i])
+#     # if w[i] == 0:
+#         # inp += '*'
+#     # else:
+#     inp += tokenizer.decode(x[i])
+#     # tar += tokenizer.decode(x[i])
 
 # print(inp)
-# print('-+'*20)
-# print(tar)
+# # print('-+'*20)
+# # print(tar)
+
+# for i in range(1024):
+#     if w[i] == 1:
+#         print(w[i], tokenizer.decode(x[i]), '->', tokenizer.decode(y[i]))
+
+# print("\n\n----\n\n")
+
 
 def save_state(
     iter_step,
@@ -485,6 +529,14 @@ def load_state(path=TrainConfig.SAVE_PATH):
 
     with open(os.path.join(path, "train_info.json"), "r") as f:
         train_info = json.load(f)
+    
+    for k, v in train_info['training_params'].items():
+        if k == 'LOAD_PREV': continue
+        elif k == 'TRAIN_DATASET_LEN': assert v == len(dataset), "Dataset length is not same"
+        elif v != config_dict[k]:
+            print(f"Train key {k} missmatch: previous value '{v}' != current value '{config_dict[k]}'")
+            sys.exit()
+    print("\n----\nCheckpoint key matched\n----")
 
     mx.eval(model.state, optimizer.state)
     print("Model loaded", flush=True)
@@ -506,6 +558,8 @@ eval_loss = defaultdict(float)
 if TrainConfig.LOAD_PREV:
     del model
     model, optimizer, itr_start, losses, eval_losses, seen_tokens = load_state()
+    
+
 win_loss = sum(losses)
 # nn.quantize(model)
 
@@ -521,21 +575,35 @@ def cal_kl_div(_curr_model_logits, x, pad_mask, label_weight=None):
     return kl_div
 
 
+DFT_WEIGHT_VAR = TrainConfig.DFT_WEIGHT
+
 # state = [model.state, optimizer.state]
 # @partial(mx.compile, inputs=state, outputs=state)
 def cal_loss(model, x, y, pad_mask):
     logits = model(x)
     # Shape: (bs, ctx_len)
     tok_loss = nn.losses.cross_entropy(logits, y, reduction="none")
+    
+    # MASKING SPECIAL TOKEN PREDICTION -> <|im_start|> but not <|im_end|> (EOS TOKEN)
+    # for sp_tok in tokenizer.all_special_ids:
+        # if sp_tok == tokenizer.eos_token_id:
+            # continue
+        # pad_mask = mx.where(y == sp_tok, 0, pad_mask)
     total_toks = mx.maximum(pad_mask.sum(), 1e-7)
+    # total_toks = pad_mask.sum()
+    # if total_toks.item() == 0:
+        # return mx.array(0), mx.array(0)
 
     if TrainConfig.DFT_WEIGHT > 0:
         # DFT ref: https://github.com/yongliang-wu/DFT/ | https://github.com/Lauorie/DFT
         # Another implementation: memory and compute efficient
         # Ref: https://github.com/yongliang-wu/DFT/issues/5
         probs_at_labels = mx.exp(mx.stop_gradient(-tok_loss))
-        dft_weight = TrainConfig.DFT_WEIGHT #0.9  # 1
+        dft_weight = DFT_WEIGHT_VAR
         probs_at_labels = probs_at_labels * dft_weight + (1 - dft_weight)
+        # Making sure EOS token ID has weight of 1
+        probs_at_labels = mx.where(y == tokenizer.eos_token_id, 1, probs_at_labels)
+        
         dft_loss = (tok_loss * probs_at_labels * pad_mask).sum() / total_toks
         if TrainConfig.KL_DIV_WEIGHT and TrainConfig.KL_DIV_WEIGHT > 0:
             kl_div = cal_kl_div(logits, x, pad_mask, label_weight=probs_at_labels)
@@ -564,6 +632,7 @@ def train_step(x, y, w):
 
 # @partial(mx.compile)
 def model_eval(tqdm_disable=False):
+    # return 0, 0
     eval_loss, eval_kl = [], []
     model.eval()
     for eval_itr in tqdm(range(len(eval_dataset)), leave=False, disable=tqdm_disable):
@@ -592,6 +661,7 @@ if itr_start == 0:
         "lr": optimizer.learning_rate.item(),
     }
 
+total_steps = int(len(dataset) * TrainConfig.EPOCHS) // TrainConfig.BATCH_SIZE
 mx.eval(state)
 total_loss = sum(losses)
 for itr in tqdm_data:
@@ -599,8 +669,12 @@ for itr in tqdm_data:
         dataset, idx=itr % len(dataset), batch_size=TrainConfig.BATCH_SIZE
     )
     toks = w.sum().item()
-    loss, kl_div = train_step(x, y, w)
-    loss, kl_div = loss.item(), kl_div.item()
+    DFT_WEIGHT_VAR = linear_to_one(itr, total_steps, TrainConfig.DFT_WEIGHT)
+    if w.sum().item() == 0:
+        loss, kl_div = 0, 0
+    else:
+        loss, kl_div = train_step(x, y, w)
+        loss, kl_div = loss.item(), kl_div.item()
     non_pad_toks = mx.where(x != tokenizer.pad_token_id, 1, 0).sum().item()
     mx.eval(state)
     losses.append(loss)
@@ -608,9 +682,15 @@ for itr in tqdm_data:
     seen_tokens += toks
 
     if (itr + 1) % log_steps == 0:
-        tqdm_data.set_description(
-            f"TL {total_loss / (itr + 1):1.4f}|{kl_div:1.4f} / EL {eval_loss:1.4f}|{eval_kl_div:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
-        )
+        if TrainConfig.DFT_WEIGHT == 0:
+            tqdm_data.set_description(
+                f"TL {total_loss / (itr + 1):1.4f}|{kl_div:1.4f} / EL {eval_loss:1.4f}|{eval_kl_div:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
+            )
+        else:
+            tqdm_data.set_description(
+                f"TL {total_loss / (itr + 1):1.4f}|{kl_div:1.4f}|{DFT_WEIGHT_VAR:0.4f} / EL {eval_loss:1.4f}|{eval_kl_div:1.4f} / CTX {int(toks), int(non_pad_toks), ctx[0]} | LR {optimizer.learning_rate.item():1.6f}"
+            )
+        
         if (itr + 1) % 500 == 0:
             eval_loss, eval_kl_div = model_eval(False)
             eval_losses[itr + 1] = {

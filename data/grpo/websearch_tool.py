@@ -110,7 +110,7 @@ def tool_calling_traces(tokenizer, prompt_token_len):
     return new_dataset
 
 
-def scorer(llm_gen, tools_ground, def_tools):
+def scorer(llm_gen, llm_judge, tools_ground, def_tools):
     # Adding think tag (prefilled in dataset)
     # Tool score
     # llm_gen = "<tool_call>" + llm_gen
