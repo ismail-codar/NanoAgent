@@ -56,12 +56,10 @@ from utils.webtool import tool_call_extract
 
 @dataclass
 class TrainConfig:
-    # =============================================================================
-    # SECTION DIVIDER: Configuration
-    # =============================================================================
+    """Training configuration for GRPO."""
     # Iterations
     ITERS: int = 3_000
-    GENERATE_DATA: bool = True
+    GENERATE_DATA: bool = False
     BATCH_SIZE: int = 1
     GEN_LEN: int = 256 + 128
     SAVE_FREQ: int = 50
@@ -84,14 +82,15 @@ class TrainConfig:
     SAVE_PATH: str = "weights/NanoAgent-135M-grpo-ifeval"
     DATA_PATH: str = "data/datasets/grpo_cache.pickle"
     MODEL: str = "weights/NanoAgent-135M-nemotron-sft"
-    FREEZE_LAYERS = []
+    FREEZE_LAYERS: list = []
     QUANTIZATION: int | None = None
     GRADIENT_CHECKPOINT_LAYERS: int | None = 6
+    DYNAMIC_PADDING: bool = True
     EVAL_SAMPLES: int = 100
     TQDM: bool = True
     STD_NORM: bool = False
     SAMPLING: str = 'token'
-    SOFT_CLIP: bool = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
+    SOFT_CLIP: bool = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
     TEMPERATURE: float = 0.8
     MIN_P: float | None = None
     TOP_K: int | None = None
@@ -142,9 +141,6 @@ config_dict = {
 }
 print(json.dumps(config_dict, indent=2))
 
-# =============================================================================
-# SECTION DIVIDER: Model Loading
-# =============================================================================
 
 # The model that will be trained
 
@@ -181,17 +177,14 @@ tokenizer = get_tokenizer("HuggingFaceTB/SmolLM2-135M", add_bos=False)
 # tokenizer = get_tokenizer("google/functiongemma-270m-it", add_bos=True)
 assert tokenizer.pad_token_id != tokenizer.eos_token_id, "Pad token and EOS token must be different"
 
-# =============================================================================
-# SECTION DIVIDER: Learning Rate Schedulers
-# =============================================================================
 
-# Learning Rate Schedulers
 def linear_decay_with_warmup(
     base_lr: float,
     total_steps: int,
     warmup_steps: int,
     decay_steps: int,
 ):
+    """Learning rate scheduler with linear warmup and linear decay."""
     assert total_steps > warmup_steps + decay_steps
     def schedule(step):
         # Linear warmup: 0 → base_lr
@@ -249,11 +242,8 @@ optimizer = optim.AdamW(
 #             [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
 # )
 
-# =============================================================================
-# SECTION DIVIDER: Helper Functions
-# =============================================================================
-
 def total_tokens(data):
+    """Count tokens in text."""
     return len(
         tokenizer.encode(
             data,
@@ -262,13 +252,10 @@ def total_tokens(data):
 
 
 def tool_tokens(ground_tool_call):
+    """Count tokens in a tool call JSON."""
     ntokens = len(tokenizer.encode(json.dumps(ground_tool_call)))
     return ntokens
 
-
-# =============================================================================
-# SECTION DIVIDER: Dataset Loading
-# =============================================================================
 
 if TrainConfig.GENERATE_DATA:
     ds_size = 4 * TrainConfig.ITERS
@@ -327,11 +314,8 @@ else:
     eval_ds = None
 
 
-# =============================================================================
-# SECTION DIVIDER: Evaluation & Plotting Helpers
-# =============================================================================
-
 def evaluate(eval_model, runs=4, temp=0.):
+    """Run evaluation on eval_ds and return rewards."""
     # return [0]
     if not eval_ds:
         return [0]
@@ -355,6 +339,7 @@ def evaluate(eval_model, runs=4, temp=0.):
 
 
 def mean_map(data, win=20):
+    """Compute moving average with window size win."""
     def _mean(x):
         # while len(x) < win: x.append(min(x))
         return sum(x) / len(x)
@@ -375,6 +360,7 @@ def prog_graph(
     save_path=None,
     plot=True,
 ):
+    """Plot training progress (loss, rewards, eval scores, learning rate)."""
     plt.close()
     fig, axes = plt.subplots(4, 1, figsize=(18, 12), dpi=600)
     fig.suptitle(f"GRPO Iter: {iter}", fontsize=13)
@@ -436,6 +422,7 @@ def prog_graph(
 
 
 def load_state(path=TrainConfig.SAVE_PATH):
+    """Load model, optimizer, and training state from checkpoint."""
     with open(os.path.join(path, "train_info.json"), "r") as f:
         train_info = json.load(f)
     
@@ -517,6 +504,7 @@ def save_state(
     optimizer,
     path=TrainConfig.SAVE_PATH,
 ):
+    """Save model, optimizer, and training state to checkpoint."""
     # Save optimizer the state
     # https://ml-explore.github.io/mlx/build/html/python/optimizers.html
     if not os.path.exists(path):
@@ -555,9 +543,7 @@ def save_state(
 
 
 def interpolate_models(past_model: nn.Module, present_model: nn.Module, weight: float):
-    """
-    Linearly interpolate all parameters between two MLX models.
-    """
+    """Linearly interpolate all parameters between two MLX models."""
     assert 0.0 <= weight <= 1.0, "weight must be in [0, 1]"
     if weight == 1:
         return present_model.parameters()
@@ -580,6 +566,7 @@ def interpolate_models(past_model: nn.Module, present_model: nn.Module, weight: 
 
 
 def soft_gate(x, advantages, t_pos=1, t_neg=1.07):
+    """SAPO soft clipping function. Applies different temperature based on advantage sign."""
     # SAPO default: t_pos=1, t_neg=1.05
     temp = mx.where(advantages > 0, t_pos, t_neg)
     return mx.sigmoid(temp * (x-1)) * (4 / temp)
@@ -590,70 +577,106 @@ def soft_gate(x, advantages, t_pos=1, t_neg=1.07):
 def grpo_loss_fn(
     model, model_ref, rollout_tokens, rollout_mask, rollout_logprobs, advantages, beta
 ):    
-    """The GRPO loss function."""
+    """
+    GRPO loss function.
+    
+    Computes policy gradient loss with optional KL penalty.
+    - rollout_mask: 2=prompt (ignore), 1=response (train), 0=padding
+    - advantages: normalized reward within each group
+    """
     model.train().unfreeze()
     
+    # Ensure arrays are MLX arrays
     rollout_tokens = mx.array(rollout_tokens) if not isinstance(rollout_tokens, mx.array) else rollout_tokens
     rollout_mask = mx.array(rollout_mask) if not isinstance(rollout_mask, mx.array) else rollout_mask
     rollout_logprobs = mx.array(rollout_logprobs) if not isinstance(rollout_logprobs, mx.array) else rollout_logprobs
     
+    # Forward pass: get logits for all tokens
     logits = model(rollout_tokens)
+    
+    # Shift logits by 1 for next-token prediction (token at position t predicts token at t+1)
     logits = mx.roll(logits, shift=1, axis=-1)
     log_probs = nn.log_softmax(logits, axis=-1)
     
+    # Gather logprobs for the actual tokens (select prob of token_id from vocabulary distribution)
     indices = rollout_tokens[:, :, None]
     selected_log_probs = mx.take_along_axis(log_probs, indices, axis=-1).squeeze(-1)
     
+    # Create binary mask: only response tokens (mask=1) contribute to loss
     response_mask = mx.where(rollout_mask == 1, 1.0, 0.0)
     log_probs_for_loss = selected_log_probs * response_mask
     
+    # Old logprobs from rollout (stored during generation)
     old_logprobs = rollout_logprobs
     
+    # === Policy gradient loss ===
     if TrainConfig.SAMPLING == 'token':
+        # Token-level GRPO: ratio = exp(new_logprob - old_logprob)
         ratio = mx.exp(log_probs_for_loss - old_logprobs)
+        # Broadcast advantages to per-token: same advantage for all tokens in a sequence
         advantages = mx.expand_dims(advantages, axis=1) * response_mask
+        
         if not TrainConfig.SOFT_CLIP:
+            # Clip ratio to stabilize training (standard GRPO)
             clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
             token_policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages) * response_mask
         else:
+            # SAPO: soft clipping with sigmoid gate
             token_policy_reward = soft_gate(ratio, advantages) * advantages * response_mask
     elif TrainConfig.SAMPLING == 'custom':
+        # Sequence-level: advantage weighted by mean logprob
         token_policy_reward = advantages * ((log_probs_for_loss * response_mask).sum(axis=-1) / response_mask.sum(axis=-1))
     else:
         raise NotImplementedError
 
+    # === KL divergence penalty (optional) ===
+    # Penalizes moving too far from reference model when beta > 0
     if beta > 0:
+        # Get reference model logprobs
         logits_ref = model_ref(rollout_tokens)
         log_probs_ref = nn.log_softmax(logits_ref, axis=-1)
         selected_log_probs_ref = mx.take_along_axis(log_probs_ref, indices, axis=-1).squeeze(-1)
         log_probs_ref_for_loss = selected_log_probs_ref * response_mask
         
+        # KL divergence: KL(ref || new) = exp(ref) * (ref - new)
+        # Using: ratio - log(ratio) - 1, which is equivalent for small differences
         log_ratio_for_kl = log_probs_ref_for_loss - log_probs_for_loss
         ratio_for_kl = mx.exp(log_ratio_for_kl)
         kl_div = ratio_for_kl - log_ratio_for_kl - 1
         kl_div = kl_div * response_mask
+        # Stop gradient: don't backprop through reference model
         kl_div = mx.stop_gradient(kl_div)
         
         if TrainConfig.SAMPLING == 'token':
             token_policy_reward = token_policy_reward - beta * kl_div
         else:
+            # Average KL per token
             kl_div = kl_div.sum(axis=-1) / response_mask.sum(axis=-1)
             token_policy_reward = token_policy_reward - beta * kl_div
 
+    # === Final loss normalization ===
     if TrainConfig.SAMPLING == 'token':
+        # Average over response tokens only
         token_policy_reward = token_policy_reward.sum() / response_mask.sum()
     elif TrainConfig.SAMPLING == 'custom':
         token_policy_reward = token_policy_reward.sum()
     
+    # Negative because we maximize reward (gradient descent minimizes)
     return -1 * (token_policy_reward)
 
 
 # @partial(mx.compile, inputs=model.state)
 def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling=False):
+    """
+    Generate rollouts for a single prompt.
+    
+    Two-pass dynamic padding:
+    1. First loop: collect raw (unpadded) rollouts
+    2. Second pass: pad all rollouts to the longest prompt+response length
+    """
     model.eval().freeze()
     prompt_tokens = tokenizer.encode(prompt)
     prompt_len = len(prompt_tokens)
-    max_len = TrainConfig.GEN_LEN + TrainConfig.MAX_INPUT_LEN
     
     sampler = make_sampler(
         temp=TrainConfig.TEMPERATURE,
@@ -670,7 +693,11 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
     else:
         logits_processors = None
     
-    rollout_tokens, rollout_mask, rollout_logprobs, rollout_rewards = [], [], [], []
+    # === FIRST PASS: Collect raw rollouts without padding ===
+    # raw_tokens: prompt + response (unpadded, variable length)
+    # raw_masks: 2 for prompt tokens, 1 for response tokens, 0 for padding
+    # raw_logprobs: 0 for prompt, actual logprobs for response tokens
+    raw_tokens, raw_masks, raw_logprobs, rollout_rewards = [], [], [], []
     max_sample_step = group_size
     if dynamic_sampling:
         max_sample_step *= 3
@@ -692,6 +719,7 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
             response_tokens.append(resp.token)
             response_logprob.append(resp.logprobs)
         
+        # Reward: -1 if didn't stop properly, otherwise use scorer
         if resp.finish_reason != 'stop' or response_tokens[-1] != tokenizer.eos_token_id:
             reward = -1.0
         else:
@@ -704,28 +732,58 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
         response_logprob = mx.array(response_logprob)
         response_len = len(response_tokens)
         
+        # Concatenate prompt + response (no padding yet)
         full_tokens = mx.concatenate([mx.array(prompt_tokens), response_tokens])
-        padding_needed = max_len - len(full_tokens)
-        if padding_needed > 0:
-            full_tokens = mx.concatenate([full_tokens, mx.full(padding_needed, tokenizer.pad_token_id, dtype=full_tokens.dtype)])
         
+        # Mask: 2 = prompt tokens (ignored in loss), 1 = response tokens (train), 0 = padding (ignore in loss)
         mask = mx.concatenate([mx.full(prompt_len, 2, dtype=mx.int32), mx.full(response_len, 1, dtype=mx.int32)])
-        if padding_needed > 0:
-            mask = mx.concatenate([mask, mx.zeros(padding_needed, dtype=mx.int32)])
         
+        # Extract logprobs for the actual generated tokens (prompt logprobs = 0)
         logprobs_slice = mx.take_along_axis(response_logprob, response_tokens[:, None], axis=-1).squeeze(-1)
         logprobs = mx.concatenate([mx.zeros(prompt_len, dtype=mx.float32), logprobs_slice])
-        if padding_needed > 0:
-            logprobs = mx.concatenate([logprobs, mx.zeros(padding_needed, dtype=mx.float32)])
         
-        rollout_tokens.append(full_tokens)
-        rollout_mask.append(mask)
-        rollout_logprobs.append(logprobs)
+        raw_tokens.append(full_tokens)
+        raw_masks.append(mask)
+        raw_logprobs.append(logprobs)
         rollout_rewards.append(reward)
         
         if len(rollout_rewards) == group_size:
             break
     
+    # Handle edge case: no valid rollouts
+    if not raw_tokens:
+        if rollout_rewards and max(rollout_rewards) > 0:
+            rrewards = mx.array(rollout_rewards)
+            mean_reward = mx.mean(rrewards)
+            std_reward = mx.sqrt(mx.var(rrewards))
+            advantages = (rrewards - mean_reward)
+            if TrainConfig.STD_NORM:
+                advantages = advantages / (std_reward + 1e-12)
+        else:
+            advantages = mx.array([])
+            rollout_rewards = []
+        return [], [], [], rollout_rewards, advantages
+    
+    # === Find max length for dynamic padding ===
+    if TrainConfig.DYNAMIC_PADDING:
+        max_prompt_answer_len = max(len(t) for t in raw_tokens)
+    else:
+        max_prompt_answer_len = TrainConfig.MAX_INPUT_LEN + TrainConfig.GEN_LEN
+        
+    
+    # === SECOND PASS: Pad all rollouts to max length ===
+    rollout_tokens, rollout_mask, rollout_logprobs = [], [], []
+    for full_tokens, mask, logprobs in zip(raw_tokens, raw_masks, raw_logprobs):
+        padding_needed = max_prompt_answer_len - len(full_tokens)
+        if padding_needed > 0:
+            # Pad tokens with pad_token_id, mask/logprobs with zeros
+            full_tokens = mx.concatenate([full_tokens, mx.full(padding_needed, tokenizer.pad_token_id, dtype=full_tokens.dtype)])
+            mask = mx.concatenate([mask, mx.zeros(padding_needed, dtype=mx.int32)])
+            logprobs = mx.concatenate([logprobs, mx.zeros(padding_needed, dtype=mx.float32)])
+        
+        rollout_tokens.append(full_tokens)
+        rollout_mask.append(mask)
+        rollout_logprobs.append(logprobs)
 
     if rollout_rewards and max(rollout_rewards) > 0:
         rrewards = mx.array(rollout_rewards)
@@ -761,6 +819,7 @@ def grpo_train_loop(
     std_rewards=[],
     eval_rewards=[]
 ):
+    """Main GRPO training loop."""
     
     accum_grads = None
     if model_ref is not None and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
@@ -868,7 +927,7 @@ def grpo_train_loop(
         print(train_set[batch_index%len(train_set)]['prompt'])
         prompt_len = len(tokenizer.encode(train_set[batch_index%len(train_set)]['prompt']))
         for re, rt in zip(rollout_rewards, rollout_tokens):
-            response_decoded = tokenizer.decode(rt[prompt_len:].tolist())
+            response_decoded = tokenizer.decode(rt[prompt_len:].tolist()).removesuffix('<|endoftext|>')
             print(f"{re:.2f}: --> {response_decoded}")
             print("---")
         print()
