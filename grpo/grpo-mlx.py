@@ -60,7 +60,7 @@ class TrainConfig:
     """Training configuration for GRPO."""
     # Iterations
     ITERS: int = 5_000
-    GENERATE_DATA: bool = True
+    GENERATE_DATA: bool = False
     BATCH_SIZE: int = 1
     GEN_LEN: int = 384
     SAVE_FREQ: int = 50
@@ -91,12 +91,12 @@ class TrainConfig:
     TQDM: bool = True
     STD_NORM: bool = False
     SAMPLING: str = 'token'
-    SOFT_CLIP: bool = True # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
+    SOFT_CLIP: bool = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
     TEMPERATURE: float = 0.8
     MIN_P: float | None = None
     TOP_K: int | None = None
     TOP_P: float = 0.9
-    REPETITION_PENALTY: float = 1.07
+    REPETITION_PENALTY: float = 1.1
 
 # GSPO Constraints:
 # -----------------
@@ -395,7 +395,7 @@ def prog_graph(
     axes[1].set_title("Rewards")
     axes[1].legend()
     axes[1].grid(True)
-    # axes[1].set_ylim(bottom=0)
+    axes[1].set_ylim(bottom=0)
 
     itrs = [x['iter'] for x in eval_rewards]
     eval_greedy = [e['eval_score'] for e in eval_rewards]

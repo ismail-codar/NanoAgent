@@ -111,16 +111,22 @@ def get_llm_response(messages, think=False, n_tokens=2):
 #         and (text.count("```json\n") == 1) \
 #         and (text.count("\n```") == 1)
 
-def validate_format(text):
+def validate_format(text, reasoning=False):
     """
     Validate if the text strictly follows the pattern:
-    <think> ... </think><tool_call> ... </tool_call>
-
+    Think string
+    ```json
+    [{}]
+    ```
     Returns True if the string matches the pattern, False otherwise.
     """
-    pattern = re.compile(
-        r"^\s*\S[\s\S]*?```json\s.*?\s```$", re.DOTALL
-    )
+    if reasoning:
+        pattern = re.compile(
+            r"^\s*\S[\s\S]*?```json\s.*?\s```$", re.DOTALL
+        )
+    else:
+        pattern = re.compile(r"^.*?\s*```json\s.*?\s```$", re.DOTALL)
+
     return bool(pattern.match(text)) \
         and (text.count("```json\n") == 1) \
         and (text.count("```") == 2)
