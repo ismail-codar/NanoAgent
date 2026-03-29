@@ -51,7 +51,6 @@ matplotlib.use("Agg")
 
 from dataclasses import dataclass
 from utils.tokenizer import get_tokenizer
-from utils.webtool import tool_call_extract
 
 
 @dataclass

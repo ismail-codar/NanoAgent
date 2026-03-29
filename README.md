@@ -73,27 +73,117 @@ Each dataset retains its original license, and use of those datasets is subject 
 
 ### Model Comparison
 
-| Benchmark | SmolLM2-135M-Instruct | NanoAgent-v0.1 | NanoAgent-v0.2 |
-|-----------|:---------------------:|:--------------:|:--------------:|
-| **Commonsense QA** (acc) | 20.88% | 20.72% | 20.23% |
-| **IFEval** (prompt strict) | 21.63% | 24.58% | **29.94%** |
-| **IFEval** (inst strict) | 35.01% | 37.89% | **42.33%** |
-| **IFEval** (prompt loose) | 23.84% | 26.80% | **32.16%** |
-| **IFEval** (inst loose) | 37.65% | 40.05% | **45.32%** |
-| **tinyArc** (acc_norm) | 33.76% | **38.25%** | 36.47% |
-| **tinyGSM8k** (exact_match) | 0.55% | **5.95%** | 2.31% |
-| **tinyHellaswag** (acc_norm) | 42.20% | 40.41% | **43.45%** |
-| **tinyMMLU** (acc_norm) | 26.79% | 25.30% | **27.62%** |
-| **tinyTruthfulQA** (acc) | 38.65% | 38.90% | **40.45%** |
-| **tinyWinogrande** (acc_norm) | 46.48% | **48.56%** | 42.86% |
+| Benchmark | SmolLM2-135M-Instruct | NanoAgent |
+|-----------|:---------------------:|:---------:|
+| **Commonsense QA** (acc) | 20.88% | 20.23% |
+| **IFEval** (prompt strict) | 21.63% | **29.94%** |
+| **IFEval** (inst strict) | 35.01% | **42.33%** |
+| **IFEval** (prompt loose) | 23.84% | **32.16%** |
+| **IFEval** (inst loose) | 37.65% | **45.32%** |
+| **tinyArc** (acc_norm) | 33.76% | 36.47% |
+| **tinyGSM8k** (exact_match) | 0.55% | 2.31% |
+| **tinyHellaswag** (acc_norm) | 42.20% | **43.45%** |
+| **tinyMMLU** (acc_norm) | 26.79% | **27.62%** |
+| **tinyTruthfulQA** (acc) | 38.65% | **40.45%** |
+| **tinyWinogrande** (acc_norm) | 46.48% | 42.86% |
+
+### BFCL Benchmark (Tool Calling)
+
+| Category | Accuracy | Correct/Total |
+|----------|----------|---------------|
+| **Overall** | 24.35% | 609/2501 |
+| parallel | 50.50% | 101/200 |
+| parallel_multiple | 48.00% | 96/200 |
+| simple_python | 33.75% | 135/400 |
+| simple_javascript | 32.00% | 16/50 |
+| multiple | 25.00% | 50/200 |
+| live_simple | 24.03% | 62/258 |
+| simple_java | 22.00% | 22/100 |
+| live_parallel | 18.75% | 3/16 |
+| live_parallel_multiple | 16.67% | 4/24 |
+| live_multiple | 11.40% | 120/1053 |
 
 ### Key Findings
 
-- **NanoAgent-v0.2** achieves the best **instruction following** (IFEval) across all metrics (+5-8% improvement over v0.1)
-- **NanoAgent-v0.1** leads on reasoning tasks: **tinyArc**, **tinyGSM8k**, and **tinyWinogrande**
-- **NanoAgent-v0.2** improves on **tinyMMLU**, **tinyTruthfulQA**, and **tinyHellaswag** over both predecessors
-- All NanoAgent versions significantly outperform the base SmolLM2-135M-Instruct on **IFEval** (instruction following)
-- 🧰 **Tool Calling**: Only NanoAgent (v0.1 & v0.2) support tool calling — SmolLM2-135M-Instruct does not
+- **NanoAgent** significantly outperforms the base **SmolLM2-135M-Instruct** on **instruction following** (IFEval) with +8-10% improvements across all metrics
+- **NanoAgent** improves on **tinyMMLU**, **tinyTruthfulQA**, and **tinyHellaswag** over the base model
+- 🧰 **Tool Calling**: Only NanoAgent supports tool calling — SmolLM2-135M-Instruct does not
+
+
+## ⚡ Example Usage
+
+### Basic Inference
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_name = "quwsarohi/NanoAgent-135M"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+
+def inference(messages, max_new_tokens=256, temperature=0.3, **kwargs):
+    input_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = tokenizer.encode(input_text, return_tensors="pt").to(model.device)
+    outputs = model.generate(
+        inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=True,
+        temperature=temperature,
+        **kwargs
+    )
+    return tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
+
+messages = [{"role": "user", "content": "Hi! Do you have a name?"}]
+print(inference(messages))
+```
+
+### Tool Calling
+NanoAgent uses a JSON-based tool calling format:
+
+```python
+import json
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Performs a web search and returns formatted results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query."}
+                },
+                "required": ["query"],
+            },
+        }
+    }
+]
+
+TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible tools that you can execute to retrieve information or to perform specific actions. You can execute zero or more tools to answer user question.
+
+Here are the list of tools that you have access to:
+```json
+{tools}
+```
+
+Only execute tools from above. Follow the below JSON signature to execute tools:
+```json
+[{{"name": "tool_name", "arguments": {{"arg1": "val1", ...}}}}, ...]
+```
+"""
+
+messages = [
+    {"role": "system", "content": TOOL_TEMPLATE.format(tools=json.dumps(tools, indent=2))},
+    {"role": "user", "content": "What's the latest AI news?"},
+]
+response = inference(messages, max_new_tokens=512)
+print(response)
+# Output: ```json
+# [{"name": "web_search", "arguments": {"query": "latest AI news 2026"}}]
+# ```
+```
 
 
 ## 🧭 Roadmap

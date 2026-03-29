@@ -6,15 +6,22 @@ This script evaluates NanoAgent's BFCL responses by comparing with ground truth.
 It parses the model's JSON tool calls and checks if they match the expected answers.
 """
 
+import ast
 import json
 import re
-from ast import literal_eval
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
+from utils.tools import parse_tool_calls
+
+CURR_FPATH = Path(__file__).parent.resolve()
 BFCL_DATA_DIR = Path("/opt/homebrew/lib/python3.11/site-packages/bfcl_eval/data")
-RESULT_DIR = Path("/Users/ohi/Documents/GitHub/NanoAgent/benchmarks/bfcl/result/nanoagent")
-OUTPUT_DIR = Path("/Users/ohi/Documents/GitHub/NanoAgent/benchmarks/bfcl")
+
+# MODEL_PATH = "weights/SmolLM2-135M-Instruct-nemotron-instruct-fc-instruct-sft"
+MODEL_PATH = "quwsarohi/NanoAgent-135M"
+
+RESULT_DIR = OUTPUT_DIR = CURR_FPATH.parent / 'results' / 'bfcl' / MODEL_PATH.split('/')[-1].lower().replace('-', '__')
+
 
 
 def load_ground_truth(category: str) -> List[Dict]:
@@ -39,45 +46,6 @@ def load_results(category: str) -> List[Dict]:
     
     with open(filepath, "r") as f:
         return json.load(f)
-
-
-def parse_tool_calls(response: str) -> Optional[List[Dict]]:
-    """Extract tool calls using regex patterns and parse with literal_eval/json."""
-    if not response:
-        return None
-    
-    # Pattern 1: Markdown code blocks ```json ... ```
-    pattern1 = re.compile(r"```json\s(.*?)```", re.DOTALL)
-    matches = pattern1.findall(response)
-    
-    # Pattern 2: XML-style <tool_call>...</tool_call>
-    if not matches:
-        pattern2 = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        matches = pattern2.findall(response)
-    
-    # Try parsing each match
-    for match in matches:
-        # Try literal_eval first (handles single quotes)
-        try:
-            parsed = literal_eval(match)
-            if isinstance(parsed, list):
-                return parsed
-            elif isinstance(parsed, dict):
-                return [parsed]  # Wrap single dict in list
-        except:
-            pass
-        
-        # Try json.loads (standard JSON with double quotes)
-        try:
-            parsed = json.loads(match)
-            if isinstance(parsed, list):
-                return parsed
-            elif isinstance(parsed, dict):
-                return [parsed]
-        except:
-            pass
-    
-    return None
 
 
 def normalize_tool_call(tool_call: Dict) -> Dict:
@@ -108,36 +76,73 @@ def normalize_tool_call(tool_call: Dict) -> Dict:
     return normalized
 
 
-def check_match(predicted: Dict, ground_truth: List[Dict]) -> bool:
+def _parse_gt_string(gt_str: str) -> tuple:
+    """Parse ground truth string like "func_name(arg1='value1', arg2='value2')"."""
+    match = re.match(r"(\w+)\((.*)\)", gt_str)
+    if not match:
+        return None, {}
+    func_name = match.group(1)
+    args_str = match.group(2)
+    
+    args = {}
+    arg_pattern = re.findall(r"(\w+)=([^,]+)", args_str)
+    for key, value in arg_pattern:
+        value = value.strip().strip("'\"")
+        args[key] = value
+    return func_name, args
+
+
+def check_match(predicted: Dict, ground_truth: List) -> bool:
     """
     Check if predicted tool call matches any of the ground truth answers.
+    
+    Handles two formats:
+    - Single-turn: [{function_name: {arg_name: [possible_values]}}]
+    - Multi-turn: [["func(arg=value)", "func2(arg=value)"], [...]]
     """
     pred_normalized = normalize_tool_call(predicted)
     pred_name = pred_normalized.get("name", "")
     pred_args = pred_normalized.get("arguments", {})
     
     for gt in ground_truth:
-        # Ground truth format: {function_name: {arg_name: [possible_values]}}
-        for func_name, func_args in gt.items():
-            if func_name != pred_name:
+        if isinstance(gt, str):
+            gt_name, gt_args = _parse_gt_string(gt)
+            if gt_name != pred_name:
                 continue
             
-            # Check all required arguments
             all_args_match = True
-            for arg_name, expected_values in func_args.items():
+            for arg_name, expected_value in gt_args.items():
                 if arg_name not in pred_args:
                     all_args_match = False
                     break
                 
                 pred_value = pred_args[arg_name][0] if pred_args[arg_name] else None
                 
-                # Check if predicted value is in the list of acceptable values
-                if pred_value not in expected_values:
+                if str(pred_value) != str(expected_value):
                     all_args_match = False
                     break
             
             if all_args_match:
                 return True
+        else:
+            for func_name, func_args in gt.items():
+                if func_name != pred_name:
+                    continue
+                
+                all_args_match = True
+                for arg_name, expected_values in func_args.items():
+                    if arg_name not in pred_args:
+                        all_args_match = False
+                        break
+                    
+                    pred_value = pred_args[arg_name][0] if pred_args[arg_name] else None
+                    
+                    if pred_value not in expected_values:
+                        all_args_match = False
+                        break
+                
+                if all_args_match:
+                    return True
     
     return False
 
@@ -242,12 +247,12 @@ def main():
         "live_parallel_multiple",
         "live_irrelevance",
         "live_relevance",
-        "multi_turn_base",
-        "multi_turn_miss_func",
-        "multi_turn_miss_param",
-        "multi_turn_long_context",
-        "memory",
-        "web_search",
+        # "multi_turn_base",
+        # "multi_turn_miss_func",
+        # "multi_turn_miss_param",
+        # "multi_turn_long_context",
+        # "memory",
+        # "web_search",
     ]
     
     if args.category:

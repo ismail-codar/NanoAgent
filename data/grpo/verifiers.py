@@ -1,18 +1,13 @@
 import json
 import re
 from difflib import SequenceMatcher
-from functools import partial
-import random
-
-from utils.tokenizer import TOOL_TEMPLATE
-# from utils.webtool import tool_call_extract
-from data.utils import tool_parse
-from data.utils import THINK_STRINGS
 
 import ollama
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+from utils.tools import parse_tool_calls
 
 # OLLAMA_MODEL = "qwen3:4b"
 OLLAMA_MODEL = "qwen3:1.7b"
@@ -139,35 +134,6 @@ def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
         return 0, None
 
 
-# def tool_call_extract(inp_str: str):
-#     """
-#     Extracts tool call from format:
-#     <tool_call>
-#     JSON tool call
-#     </tool call>
-#     """
-#     pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-#     tool_calls = pattern.findall(inp_str)
-#     if tool_calls:
-#         tool_call = tool_parse(tool_calls[0])
-#         return tool_call
-#     return None
-
-def tool_call_extract(inp_str: str):
-    """
-    Extracts tool call from format:
-    ```json
-    JSON tool call
-    ```
-    """
-    pattern = re.compile(r"```json\s(.*?)```", re.DOTALL)
-    tool_calls = pattern.findall(inp_str)
-    if tool_calls:
-        tool_call = tool_parse(tool_calls[0])
-        return tool_call
-    return None
-
-
 def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
     def uniform(s:str):
         return sorted(list(s.lower()))
@@ -177,7 +143,7 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
         print("Ground tools:", type(tools_ground), json.dumps(tools_ground))
 
     assert isinstance(llm_gen, str)
-    tools_gen = tool_call_extract(llm_gen)
+    tools_gen = parse_tool_calls(llm_gen)
     if verbose:
         print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
     tool_ground_names = [t['name'] for t in tools_ground]

@@ -22,6 +22,8 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
+from utils.tools import parse_tool_calls
+
 
 def get_latest_checkpoint(base_directory):
     checkpoint_dirs = []
@@ -163,38 +165,6 @@ print(dataset)
 # print("---", flush=True)
 
 
-def tool_parse(tool_call: str):
-    """
-    Parses tool call in two different formats:
-    {'function_name': 'fun1', 'arguments': {...}}
-    {"function_name": "fun1", "arguments": {...}}
-    """
-    try:
-        return literal_eval(tool_call)
-    except:
-        pass
-    try:
-        return json.loads(tool_call)
-    except:
-        pass
-    return None
-
-
-def tool_call_extract(inp_str: str):
-    """
-    Extracts tool call from format:
-    <tool_call>
-    JSON tool call
-    </tool call>
-    """
-    pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-    tool_calls = pattern.findall(inp_str)
-    if tool_calls:
-        tool_call = tool_parse(tool_calls[0])
-        return tool_call
-    return None
-
-
 def validate_format(text):
     """
     Validate if the text strictly follows the pattern:
@@ -214,7 +184,7 @@ def _scorer(tools_gen, tools_ground, verbose=False):
         print("Ground tools:", type(tools_ground), json.dumps(tools_ground))
 
     if isinstance(tools_gen, str):
-        tools_gen = tool_call_extract(tools_gen)
+        tools_gen = parse_tool_calls(tools_gen)
         if verbose:
             print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
         if tools_gen is None:
@@ -242,7 +212,7 @@ def reward_fun(prompts, completions, ground_tool_call, **kwargs):
                 print("Score:", scores[-1], flush=True)
             continue
         grnd = json.loads(grnd)
-        gen = tool_call_extract(gen)
+        gen = parse_tool_calls(gen)
         if gen is None:
             if verbose:
                 print("Invalid tool-call format")

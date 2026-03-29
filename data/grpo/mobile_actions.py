@@ -6,7 +6,6 @@ import random
 
 from data.utils import tool_shuffle
 from utils.tokenizer import TOOL_TEMPLATE
-from utils.webtool import tool_call_extract
 from data.utils import THINK_STRINGS
 
 from datasets import load_dataset

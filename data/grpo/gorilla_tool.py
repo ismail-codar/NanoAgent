@@ -7,9 +7,7 @@ from difflib import SequenceMatcher
 
 from data.utils import tool_shuffle
 from utils.tokenizer import TOOL_TEMPLATE
-from utils.webtool import tool_call_extract
-from data.utils import THINK_STRINGS
-# from data.grpo.salseforce_tool import tool_scorer
+from utils.tools import parse_tool_calls
 
 # Example usage:
 # print(func_call_to_json('coffee_shop.find_nearby("San Francisco", amenities="Wi-Fi", rating=5)'))
@@ -175,7 +173,7 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
         print("Ground tools:", type(tools_ground), json.dumps(tools_ground))
 
     assert isinstance(llm_gen, str)
-    tools_gen = tool_call_extract(llm_gen)
+    tools_gen = parse_tool_calls(llm_gen)
     if verbose:
         print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
     tool_ground_names = [t['name'] for t in tools_ground]

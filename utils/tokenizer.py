@@ -232,8 +232,7 @@ if __name__ == '__main__':
     print("\n-----\n")
     print(tokenizer.apply_chat_template([
         {"role": "system", "content": TOOL_TEMPLATE.format(tools=json.dumps(tools, indent=2))},
-        {"role": "user", "content": "How are you?"},
-        {"role": "assistant", "content": "<tool_call>[retrieve_payment_date(12)]</tool_call>"},
-        {"role": "tool", "content": "12/12/12"},
-        {"role": "assistant", "content": "12/12/12"}
+        {"role": "user", "content": "What is the payment status of 124?"},
+        {"role": "assistant", "content": f"```json\n{json.dumps([{'name': 'retrieve_payment_status', 'arguments': {'transaction_id': '124'}}])}\n```"},
+        {"role": "user", "content": "<tool_result>ID not found</tool_result>"},
     ], tokenize=False))
