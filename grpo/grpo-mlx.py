@@ -38,6 +38,8 @@ from data.grpo.websearch_tool import tool_calling_traces
 from data.grpo.mobile_actions import mobileactions
 from data.grpo.autoif import autoif_ds
 from data.grpo.ifeval import ifeval_ds
+from data.grpo.txt360_tool import txt360_toolcall
+
 # from data.grpo.gorilla_tool import gorilla_openfun
 from data.grpo.reasoning_gym import *
 from data.grpo.general_chat import general_chat_ds
@@ -57,15 +59,15 @@ from utils.tokenizer import get_tokenizer
 class TrainConfig:
     """Training configuration for GRPO."""
     # Iterations
-    ITERS: int = 3_000
+    ITERS: int = 5_000
     GENERATE_DATA: bool = False
     BATCH_SIZE: int = 1
-    GEN_LEN: int = 256 + 128
+    GEN_LEN: int = 384
     SAVE_FREQ: int = 50
     LOAD_PREV: bool = False
     LEARNING_RATE: float = 1e-7
     WEIGHT_DECAY: float = 0.2
-    EPSILON_MIN: float = 0.2    # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
+    EPSILON_MIN: float = 0.2      # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
     EPSILON_HIGH: float = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
     GROUP_SIZE: int = 8
     WARMUP_STEPS: int = 50
@@ -77,11 +79,11 @@ class TrainConfig:
     GRAD_ACCUM: int = 1
     GRAD_NORM: float | None = 1/32
     REF_MODEL_MIXUP_ALPHA: float = 0
-    MAX_INPUT_LEN: int = 512 - 128
-    SAVE_PATH: str = "weights/NanoAgent-135M-grpo-ifeval"
+    MAX_INPUT_LEN: int = 384
+    SAVE_PATH: str = "weights/NanoAgent-135M-nemotron-grpo"
     DATA_PATH: str = "data/datasets/grpo_cache.pickle"
     MODEL: str = "weights/NanoAgent-135M-nemotron-sft"
-    FREEZE_LAYERS: list = []
+    FREEZE_LAYERS = []
     QUANTIZATION: int | None = None
     GRADIENT_CHECKPOINT_LAYERS: int | None = 6
     DYNAMIC_PADDING: bool = True
@@ -94,7 +96,7 @@ class TrainConfig:
     MIN_P: float | None = None
     TOP_K: int | None = None
     TOP_P: float = 0.9
-    REPETITION_PENALTY: float = 1.05
+    REPETITION_PENALTY: float = 1.07
 
 # GSPO Constraints:
 # -----------------
@@ -274,8 +276,9 @@ if TrainConfig.GENERATE_DATA:
 
     
     # --- Tool Call ---
-    sz = int(ds_size * 1)
-    train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=True, k_shot=False)
+    sz = int(ds_size * 2.0)
+    # train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=True, k_shot=False)
+    train_ds += txt360_toolcall(tokenizer=tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN)
     # sz = int(ds_size * 0.25)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
     # sz = int(ds_size * 0.05)
@@ -378,20 +381,20 @@ def prog_graph(
     std_rewards = np.asarray(std_rewards)
     axes[1].plot(np.cumsum(all_rewards) / (np.arange(len(all_rewards)) + 1), color="tab:blue", alpha=0.8, linestyle=':', label='Cumulative Sum')
     axes[1].plot(mean_map(all_rewards), color="tab:blue", alpha=0.8, linestyle='--', label='Mean Win. 20')
-    axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue", label='Smoothen')
-    # axes[1].fill_between(
-    #     np.arange(len(all_rewards)),
-    #     all_rewards - std_rewards,
-    #     all_rewards + std_rewards,
-    #     color="tab:blue",
-    #     alpha=0.15,
-    #     # label="±1 Std"
-    # )
-    # axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
+    # axes[1].plot(gaussian_filter1d(all_rewards, sigma=2.5), linewidth=2, color="tab:blue", label='Smoothen')
+    axes[1].fill_between(
+        np.arange(len(all_rewards)),
+        all_rewards - std_rewards,
+        all_rewards + std_rewards,
+        color="tab:blue",
+        alpha=0.15,
+        label="±1 Std"
+    )
+    axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
     axes[1].set_title("Rewards")
     axes[1].legend()
     axes[1].grid(True)
-    axes[1].set_ylim(bottom=0)
+    # axes[1].set_ylim(bottom=0)
 
     itrs = [x['iter'] for x in eval_rewards]
     eval_greedy = [e['eval_score'] for e in eval_rewards]
@@ -402,7 +405,7 @@ def prog_graph(
     # axes[2].scatter(itrs, eval_sampling, color="tab:green", linewidth=2, marker="x")
     # axes[2].plot(itrs, eval_sampling, color="tab:green", alpha=0.6, linestyle='--', linewidth=2)
 
-    axes[2].set_title("Eval Rewards")
+    axes[2].set_title("Eval Rewards (Greedy)")
     axes[2].grid(True)
 
     # total_prompt_tokens
