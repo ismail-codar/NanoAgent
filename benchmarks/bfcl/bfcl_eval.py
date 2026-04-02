@@ -19,7 +19,8 @@ CURR_FPATH = Path(__file__).parent.resolve()
 BFCL_DATA_DIR = Path("/opt/homebrew/lib/python3.11/site-packages/bfcl_eval/data")
 
 # MODEL_PATH = "weights/SmolLM2-135M-Instruct-nemotron-instruct-fc-instruct-sft"
-MODEL_PATH = "quwsarohi/NanoAgent-135M"
+# MODEL_PATH = "quwsarohi/NanoAgent-135M"
+MODEL_PATH = "weights/NanoAgent-135M-nemotron-grpo/best_checkpoint"
 
 OUTPUT_DIR = CURR_FPATH.parent / 'results' / 'bfcl' / MODEL_PATH.split('/')[-1].lower().replace('-', '__')
 
@@ -72,24 +73,24 @@ def prepare_messages(question, functions, use_tools=True):
 
     if use_tools and functions:
         tools_json = json.dumps(functions, indent=2)
-#         system_content = f"""You are a helpful AI assistant. You have a set of possible tools that you can execute to retrieve information or to perform specific actions. You can execute zero or more tools to answer user question.
+        system_content = f"""You are a helpful AI assistant. You have a set of possible tools that you can execute to retrieve information or to perform specific actions. You can execute zero or more tools to answer user question.
 
-# Here are the list of tools that you have access to:
-# ```json
-# {tools_json}
-# ```
+Here are the list of tools that you have access to:
+```json
+{tools_json}
+```
 
-# Only execute tools from above. Follow the below JSON signature to execute tools:
-# ```json
-# [{{"name": "tool_name", "arguments": {{"arg1": "val1", ...}}}}, ...]
-# ```"""
-        system_content = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools></tools> tags. 
-Based on question, you may need to make one or more function/tool calls to answer user.
+Only execute tools from above. Follow the below JSON signature to execute tools:
+```json
+[{{"name": "tool_name", "arguments": {{"arg1": "val1", ...}}}}, ...]
+```"""
+#         system_content = """You are a helpful AI assistant. You have a set of possible functions/tools inside <tools></tools> tags. 
+# Based on question, you may need to make one or more function/tool calls to answer user.
 
-You have access to the following tools/functions:
-<tools>{tools}</tools>
+# You have access to the following tools/functions:
+# <tools>{tools}</tools>
 
-For each function call, return a JSON list object with function name and arguments within <tool_call></tool_call> tags."""
+# For each function call, return a JSON list object with function name and arguments within <tool_call></tool_call> tags."""
 
 
         messages.append({"role": "system", "content": system_content})
@@ -101,7 +102,7 @@ For each function call, return a JSON list object with function name and argumen
     return messages
 
 
-def generate_response(model, tokenizer, messages, max_new_tokens=384, prompt_lead="<tool_call>"):#"```json\n"):
+def generate_response(model, tokenizer, messages, max_new_tokens=384, prompt_lead="```json\n"):
     """Generate response from NanoAgent."""
     try:
         continue_final_message = prompt_lead is not None

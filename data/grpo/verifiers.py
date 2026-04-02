@@ -156,7 +156,7 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
                 gen_score += max((type_match+match_score)/2, 0.2)
             else:
                 # Add a penalty for extra attribute
-                gen_score -= 0.05
+                gen_score -= 0.1
         
         # No need
         # Check for missed ground tool attributes -> points would not be added
@@ -167,8 +167,8 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
         # Check for ground tool required attribtue
         req_ground_attribs = tool_grnd.get('parameters', {}).get('required', [])
         for ra in req_ground_attribs:
-            if ra not in tool_grnd['arguments']:
-                gen_score -= 0.05
+            if ra not in tool_gen['arguments']:
+                gen_score -= 0.1
 
         return max(min(gen_score / target_score, 1), 0)
 
@@ -219,7 +219,7 @@ def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
                 best_score = score
         if k != -1:
             taken.add(k)
-            matches.append((i, k))
+            matches.append((i, k, best_score))
             total_score += best_score
     
     total_score_normed = total_score / (len(tools_ground) + 1e-9)

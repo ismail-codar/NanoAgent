@@ -11,9 +11,7 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
-import re
 import sys
-from difflib import SequenceMatcher
 from pathlib import Path
 from collections import defaultdict
 import pickle
@@ -22,6 +20,7 @@ from copy import deepcopy
 
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
@@ -59,81 +58,44 @@ from utils.tokenizer import get_tokenizer
 class TrainConfig:
     """Training configuration for GRPO."""
     # Iterations
-    ITERS: int = 5_000
-    GENERATE_DATA: bool = True
+    ITERS: int = 1_000
+    GENERATE_DATA: bool = False
     BATCH_SIZE: int = 1
-    GEN_LEN: int = 384
+    GEN_LEN: int = 128 # 384
     SAVE_FREQ: int = 50
     LOAD_PREV: bool = False
-    LEARNING_RATE: float = 1e-7
-    WEIGHT_DECAY: float = 0.2
+    LEARNING_RATE: float = 1e-6
+    WEIGHT_DECAY: float = 0.1
     EPSILON_MIN: float = 0.2      # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
     EPSILON_HIGH: float = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
     GROUP_SIZE: int = 8
     WARMUP_STEPS: int = 50
     DECAY_STEPS: int = 40
-    BETA: float = 0
-    EVAL_STEPS: int = 50
+    EVAL_STEPS: int = 25
     NUM_MODEL_UPDATE_MU: int = 1   # Number of backpropagations per question/rollout
-    MODEL_WEIGHT_UPDATE_FREQ: int = 32 # After how many iters old_model should be synced
-    GRAD_ACCUM: int = 1
-    GRAD_NORM: float | None = 1/32
-    REF_MODEL_MIXUP_ALPHA: float = 0
+    MODEL_WEIGHT_UPDATE_FREQ: int = 1 # After how many iters old_model should be synced
+    GRAD_NORM: float | None = 1 #0.01
     MAX_INPUT_LEN: int = 384
     SAVE_PATH: str = "weights/NanoAgent-135M-nemotron-grpo"
     DATA_PATH: str = "data/datasets/grpo_cache.pickle"
     MODEL: str = "weights/NanoAgent-135M-nemotron-sft"
     FREEZE_LAYERS = []
-    QUANTIZATION: int | None = None
     GRADIENT_CHECKPOINT_LAYERS: int | None = 6
     DYNAMIC_PADDING: bool = True
-    EVAL_SAMPLES: int = 200
+    EVAL_SAMPLES: int = 100
     TQDM: bool = True
-    STD_NORM: bool = False
-    SAMPLING: str = 'token'
-    SOFT_CLIP: bool = False # Soft clipping proposed in SAPO paper - https://arxiv.org/pdf/2511.20347
-    TEMPERATURE: float = 0.8
+    STD_NORM: bool = True
+    TEMPERATURE: float = 0.4 # 0.8
     MIN_P: float | None = None
     TOP_K: int | None = None
-    TOP_P: float = 0.9
+    TOP_P: float = 0.9 #0.9
     REPETITION_PENALTY: float = 1.05
 
-# GSPO Constraints:
-# -----------------
-# STD_NORM = True
-# SOFT_CLIP = False
-# EPSILON_MIN = 3e-3  (minimum value that updates logprob) # Sequence/GSPO: 3e-4
-# EPSILON_HIGH = 4e-3 (minimum value that updates logprob) # Sequence/GSPO: 4e-4
-# SAMPLING = "sequence"
 
-# DR GRPO Constraints:
-# --------------------
-# STD_NORM = False
-# SOFT_CLIP = False
-# EPSILON_MIN = 0.2
-# EPSILON_HIGH = 0.272
-# SAMPLING = "token"
-
-# SAPO Constraints:
-# -----------------
-# STD_NORM = False
-# SOFT_CLIP = True [main constraint]
-# EPSILON_MIN = 0.2 [unused]
-# EPSILON_HIGH = 0.272 [unused]
-# SAMPLING = "token"
-# t_pos=1, t_neg=1.05
-
-# Token Sampling: DAPO - https://arxiv.org/pdf/2503.14476
-# Sequence Sampling: GSPO - https://arxiv.org/pdf/2507.18071
-
-assert TrainConfig.SAMPLING in ['token', 'sequence', 'custom']
 assert 0 < TrainConfig.GRAD_NORM or TrainConfig.GRAD_NORM is not None
-assert 1 <= TrainConfig.GRAD_ACCUM
 assert 0 <= TrainConfig.WEIGHT_DECAY
 assert 0 <= TrainConfig.MODEL_WEIGHT_UPDATE_FREQ
-
-if TrainConfig.QUANTIZATION is not None:
-    print("WARNING: QUANTIZATION WOULD MAKE SOME/MOST PARAMETERS UNTRAINABLE")
+assert TrainConfig.GROUP_SIZE % TrainConfig.BATCH_SIZE == 0
 
 config_dict = {
     k: v
@@ -144,7 +106,6 @@ print(json.dumps(config_dict, indent=2))
 
 
 # The model that will be trained
-
 cache_mlx_path = os.path.join('weights', TrainConfig.MODEL.split('/')[-1])
 if not os.path.exists(cache_mlx_path):
     print('Downloading model and creating mlx model cache at:', cache_mlx_path)
@@ -155,18 +116,6 @@ if not os.path.exists(cache_mlx_path):
 
 model, tokenizer_mlx, model_config = load(cache_mlx_path, return_config=True)
 
-if TrainConfig.QUANTIZATION is not None:
-    nn.quantize(model, group_size=64, bits=TrainConfig.QUANTIZATION)
-    print(f"Model quantized to {TrainConfig.QUANTIZATION} bits")
-
-if TrainConfig.BETA > 0:
-    # The reference model for KL-div (freezed)
-    model_ref = load(cache_mlx_path, return_config=False)[0] #deepcopy(model)
-    model_ref.eval().freeze()
-    mx.eval(model_ref.state)
-else:
-    model_ref = None
-    
 if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1:
     model_old = load(cache_mlx_path, return_config=False)[0]
     model_old.eval().freeze()
@@ -175,7 +124,6 @@ else:
     model_old = None
 
 tokenizer = get_tokenizer("HuggingFaceTB/SmolLM2-135M", add_bos=False)
-# tokenizer = get_tokenizer("google/functiongemma-270m-it", add_bos=True)
 assert tokenizer.pad_token_id != tokenizer.eos_token_id, "Pad token and EOS token must be different"
 
 
@@ -220,7 +168,7 @@ scheduler_muon = linear_decay_with_warmup(
 )
 
 optimizer = optim.AdamW(
-    learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+    learning_rate=scheduler, weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
 )
 
 # Interesting writings:
@@ -240,22 +188,8 @@ optimizer = optim.AdamW(
 #         )
 #     ],
 #     # Where muon will be applied
-#             [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
+#     [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
 # )
-
-def total_tokens(data):
-    """Count tokens in text."""
-    return len(
-        tokenizer.encode(
-            data,
-        )
-    )
-
-
-def tool_tokens(ground_tool_call):
-    """Count tokens in a tool call JSON."""
-    ntokens = len(tokenizer.encode(json.dumps(ground_tool_call)))
-    return ntokens
 
 
 if TrainConfig.GENERATE_DATA:
@@ -263,20 +197,20 @@ if TrainConfig.GENERATE_DATA:
     train_ds = []
 
     # --- IF Eval ---
-    # sz = int(ds_size * 0.4)
-    # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
-    # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
-    sz = int(ds_size * 1.0)
-    train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
-    # sz = int(ds_size * 0.4)
-    # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
-    # random.shuffle(train_ds)
-    # train_ds = train_ds[:sz]
-    # print("IF-Eval DS size:", len(train_ds))
+    # # sz = int(ds_size * 0.4)
+    # # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
+    # # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
+    # # sz = int(ds_size * 1.0)
+    # train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
+    # # sz = int(ds_size * 0.4)
+    # # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
+    # # random.shuffle(train_ds)
+    # # train_ds = train_ds[:sz]
+    # # print("IF-Eval DS size:", len(train_ds))
 
     
     # --- Tool Call ---
-    sz = int(ds_size * 2.0)
+    sz = int(ds_size * 2.5)
     # train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=True, k_shot=False)
     train_ds += txt360_toolcall(tokenizer=tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN)
     # sz = int(ds_size * 0.25)
@@ -285,18 +219,18 @@ if TrainConfig.GENERATE_DATA:
     # train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
 
     # --- Math Mix ---
-    sz = int(ds_size * 0.25)
-    train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.1)
-    # train_ds += syllogism(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.3)
-    train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.15)
-    # train_ds += chain_sum(tokenizer, size=sz, think=False)
-    sz = int(ds_size * 0.05) # 0.1
-    train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.1)
-    # train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
+    # sz = int(ds_size * 0.25)
+    # train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
+    # # sz = int(ds_size * 0.1)
+    # # train_ds += syllogism(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.3)
+    # train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
+    # # sz = int(ds_size * 0.15)
+    # # train_ds += chain_sum(tokenizer, size=sz, think=False)
+    # sz = int(ds_size * 0.05) # 0.1
+    # train_ds += zebra_puzzles(tokenizer, size=sz, think=False)
+    # # sz = int(ds_size * 0.1)
+    # # train_ds += needle_haystack(tokenizer, size=sz*3, prompt_token_len=TrainConfig.MAX_INPUT_LEN, think=False)[:sz]
     
     random.shuffle(train_ds)
     print("New Generated Dataset length:", len(train_ds))
@@ -316,17 +250,20 @@ else:
     eval_ds = None
 
 
-def evaluate(eval_model, runs=4, temp=0.):
+def evaluate(eval_model, runs=4, temp=0):
     """Run evaluation on eval_ds and return rewards."""
     # return [0]
     if not eval_ds:
         return [0]
-    from mlx_lm.generate import generate
+    # from mlx_lm.generate import generate
     rewards = []
-    eval_model.eval()
+    eval_model.eval().freeze()
+    mx.eval(eval_model)
+
     for idx in tqdm.tqdm(range(len(eval_ds)), leave=False):
         data = eval_ds[idx]
-        prompt_tokens = tokenizer.encode(data['prompt'])
+        prompt_lead = "```json\n"
+        prompt_tokens = tokenizer.encode(data['prompt'] + prompt_lead)
         scorer = data['scorer']
         for _ in range(runs):
             response = generate(
@@ -336,7 +273,14 @@ def evaluate(eval_model, runs=4, temp=0.):
                 max_tokens=TrainConfig.GEN_LEN,
                 sampler=None if temp == 0 else lambda x: mx.random.categorical(x / temp, axis=-1)
             )
-            rewards.append(scorer(response, False))
+            reward = scorer(prompt_lead + response, False)
+            rewards.append(reward)
+            
+            # print(f"-- EVAL PROMPT {idx} ---")
+            # print(data['prompt'])
+            # print("--- EVAL GEN ---")
+            # print(response)
+
     return rewards
 
 
@@ -364,8 +308,11 @@ def prog_graph(
 ):
     """Plot training progress (loss, rewards, eval scores, learning rate)."""
     plt.close()
-    fig, axes = plt.subplots(4, 1, figsize=(18, 12), dpi=600)
-    fig.suptitle(f"GRPO Iter: {iter}", fontsize=13)
+    fig = plt.figure(figsize=(18, 12), dpi=600)
+    gs = GridSpec(3, 1, height_ratios=[4, 6, 2], hspace=0.2)
+    # fig.suptitle(f"GRPO Iter: {iter}", fontsize=13)
+
+    axes = [fig.add_subplot(gs[0]), fig.add_subplot(gs[1]), fig.add_subplot(gs[2])]
 
     # GRPO Loss
     axes[0].plot(np.cumsum(all_losses) / (np.arange(len(all_losses)) + 1), color="tab:red", alpha=0.6, linestyle=':', label='Cumulative Sum')
@@ -392,31 +339,31 @@ def prog_graph(
         label="±1 Std"
     )
     axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
+
+    itrs = [x['iter'] for x in eval_rewards]
+    eval_greedy = [e['eval_score'] for e in eval_rewards]
+
+    axes[1].scatter(itrs, eval_greedy, color="tab:red", linewidth=3, marker="*", label="Eval Score")
+    axes[1].plot(itrs, eval_greedy, color="tab:red", linewidth=1, linestyle='--')
+
     axes[1].set_title("Rewards")
     axes[1].legend()
     axes[1].grid(True)
     axes[1].set_ylim(top=1.0)
     axes[1].set_ylim(bottom=0)
 
-    itrs = [x['iter'] for x in eval_rewards]
-    eval_greedy = [e['eval_score'] for e in eval_rewards]
-
-    axes[2].scatter(itrs, eval_greedy, color="tab:green", linewidth=2, marker="*")
-    axes[2].plot(itrs, eval_greedy, color="tab:green", linewidth=2)
-
     # axes[2].scatter(itrs, eval_sampling, color="tab:green", linewidth=2, marker="x")
     # axes[2].plot(itrs, eval_sampling, color="tab:green", alpha=0.6, linestyle='--', linewidth=2)
 
-    axes[2].set_title("Eval Rewards (Greedy)")
-    axes[2].grid(True)
+    # axes[2].set_title("Eval Rewards (Greedy)")
+    # axes[2].grid(True)
 
     # total_prompt_tokens
-    axes[3].plot(learning_rates, color="tab:orange")
-    axes[3].set_title("Learning Rate")
-    axes[3].grid(True)
+    axes[2].plot(learning_rates, color="tab:orange")
+    axes[2].set_title("Learning Rate")
+    axes[2].grid(True)
 
     # Remove [0, 1] default ticks on x-axis for bottom graph
-    plt.tight_layout(pad=1)
     if save_path:
         if not os.path.exists(save_path):
             os.makedirs(save_path)
@@ -571,17 +518,9 @@ def interpolate_models(past_model: nn.Module, present_model: nn.Module, weight: 
     return tree_unflatten(new_weights)
 
 
-def soft_gate(x, advantages, t_pos=1, t_neg=1.05):
-    """SAPO soft clipping function. Applies different temperature based on advantage sign."""
-    # SAPO default: t_pos=1, t_neg=1.05
-    temp = mx.where(advantages > 0, t_pos, t_neg)
-    return mx.sigmoid(temp * (x-1)) * (4 / temp)
-
-
-
 # @partial(mx.compile, inputs=model.state)
 def grpo_loss_fn(
-    model, model_ref, rollout_tokens, rollout_mask, rollout_logprobs, advantages, beta
+    model_train, rollout_tokens, rollout_mask, rollout_logprobs, advantages
 ):    
     """
     GRPO loss function.
@@ -590,7 +529,6 @@ def grpo_loss_fn(
     - rollout_mask: 2=prompt (ignore), 1=response (train), 0=padding
     - advantages: normalized reward within each group
     """
-    model.train().unfreeze()
     
     # Ensure arrays are MLX arrays
     rollout_tokens = mx.array(rollout_tokens) if not isinstance(rollout_tokens, mx.array) else rollout_tokens
@@ -598,11 +536,15 @@ def grpo_loss_fn(
     rollout_logprobs = mx.array(rollout_logprobs) if not isinstance(rollout_logprobs, mx.array) else rollout_logprobs
     
     # Forward pass: get logits for all tokens
-    logits = model(rollout_tokens)
+    logits = model_train(rollout_tokens)
     
     # Shift logits by 1 for next-token prediction (token at position t predicts token at t+1)
-    logits = mx.roll(logits, shift=1, axis=-1)
     log_probs = nn.log_softmax(logits, axis=-1)
+    # tokens = mx.argmax(log_probs, axis=-1)
+    # log_probs[t] contains probability of t+1'th token:          log_probs[t-1]:(t)   |          log_probs[t]:(t+1) | ...
+    # rollout_logprobs[t] contain probability of t'th token: rollout_logprobs[t]:(t)   | rollout_logprobs[t+1]:(t+1) | ...
+    log_probs = mx.roll(log_probs, shift=1, axis=-1)
+    # tokens = mx.roll(tokens, shift=1, axis=-1)
     
     # Gather logprobs for the actual tokens (select prob of token_id from vocabulary distribution)
     indices = rollout_tokens[:, :, None]
@@ -611,68 +553,45 @@ def grpo_loss_fn(
     # Create binary mask: only response tokens (mask=1) contribute to loss
     response_mask = mx.where(rollout_mask == 1, 1.0, 0.0)
     log_probs_for_loss = selected_log_probs * response_mask
+
+    # print(response_mask.shape, response_mask.shape, tokens.shape)
+    # for i in range(response_mask.shape[0]):
+    #     for j in range(response_mask.shape[1]):
+    #         if response_mask[i][j] == 1:
+    #             print(i, ':', tokenizer.decode(rollout_tokens[i, j].item()), '|', tokenizer.decode(tokens[i, j].item()))
+    # input()
     
-    # Old logprobs from rollout (stored during generation)
-    old_logprobs = rollout_logprobs
+    # Broadcast advantages to per-token: same advantage for all tokens in a sequence
+    advantages = mx.expand_dims(advantages, axis=1) * response_mask
     
     # === Policy gradient loss ===
-    if TrainConfig.SAMPLING == 'token':
+    if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1:
+        old_logprobs = mx.stop_gradient(log_probs_for_loss)
+        # DAPO - Decoupled Clip and Dynamic sAmpling Policy Optimization: https://arxiv.org/pdf/2503.14476
         # Token-level GRPO: ratio = exp(new_logprob - old_logprob)
+        # How/why could old_logprobs matter? See: https://github.com/huggingface/trl/blob/035c3ff151b953ca72cdfe0ee966bc1469a26fde/trl/experimental/grpo_with_replay_buffer/grpo_with_replay_buffer_trainer.py#L159
         ratio = mx.exp(log_probs_for_loss - old_logprobs)
-        # Broadcast advantages to per-token: same advantage for all tokens in a sequence
-        advantages = mx.expand_dims(advantages, axis=1) * response_mask
-        
-        if not TrainConfig.SOFT_CLIP:
-            # Clip ratio to stabilize training (standard GRPO)
-            clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
-            token_policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages) * response_mask
-        else:
-            # SAPO: soft clipping with sigmoid gate
-            token_policy_reward = soft_gate(ratio, advantages) * advantages * response_mask
-    elif TrainConfig.SAMPLING == 'custom':
-        # Sequence-level: advantage weighted by mean logprob
-        token_policy_reward = advantages * ((log_probs_for_loss * response_mask).sum(axis=-1) / response_mask.sum(axis=-1))
-    else:
-        raise NotImplementedError
 
-    # === KL divergence penalty (optional) ===
-    # Penalizes moving too far from reference model when beta > 0
-    if beta > 0:
-        # Get reference model logprobs
-        logits_ref = model_ref(rollout_tokens)
-        log_probs_ref = nn.log_softmax(logits_ref, axis=-1)
-        selected_log_probs_ref = mx.take_along_axis(log_probs_ref, indices, axis=-1).squeeze(-1)
-        log_probs_ref_for_loss = selected_log_probs_ref * response_mask
-        
-        # KL divergence: KL(ref || new) = exp(ref) * (ref - new)
-        # Using: ratio - log(ratio) - 1, which is equivalent for small differences
-        log_ratio_for_kl = log_probs_ref_for_loss - log_probs_for_loss
-        ratio_for_kl = mx.exp(log_ratio_for_kl)
-        kl_div = ratio_for_kl - log_ratio_for_kl - 1
-        kl_div = kl_div * response_mask
-        # Stop gradient: don't backprop through reference model
-        kl_div = mx.stop_gradient(kl_div)
-        
-        if TrainConfig.SAMPLING == 'token':
-            token_policy_reward = token_policy_reward - beta * kl_div
-        else:
-            # Average KL per token
-            kl_div = kl_div.sum(axis=-1) / response_mask.sum(axis=-1)
-            token_policy_reward = token_policy_reward - beta * kl_div
+        # Clip ratio to stabilize training (standard GRPO)
+        clipped_ratio = mx.clip(ratio, 1.0 - TrainConfig.EPSILON_MIN, 1.0 + TrainConfig.EPSILON_HIGH)
+        token_policy_reward = mx.minimum(ratio * advantages, clipped_ratio * advantages) * response_mask
+
+    else:
+        # https://rlhfbook.com/c/06-policy-gradients
+        token_policy_reward = advantages * log_probs_for_loss * response_mask
 
     # === Final loss normalization ===
-    if TrainConfig.SAMPLING == 'token':
-        # Average over response tokens only
-        token_policy_reward = token_policy_reward.sum() / response_mask.sum()
-    elif TrainConfig.SAMPLING == 'custom':
-        token_policy_reward = token_policy_reward.sum()
+    # Token level aggregation: verage over response tokens only
+    token_policy_reward = token_policy_reward.sum() / response_mask.sum()
+    # Sequence level aggregation
+    # token_policy_reward = (token_policy_reward.sum(axis=-1) / response_mask.sum(axis=-1)).mean()
     
     # Negative because we maximize reward (gradient descent minimizes)
     return -1 * (token_policy_reward)
 
 
 # @partial(mx.compile, inputs=model.state)
-def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling=False):
+def rollout_batch(prompts, scorers, tokenizer, rollout_model, dynamic_sampling=True):
     """
     Generate rollouts for a single prompt.
     
@@ -680,9 +599,7 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
     1. First loop: collect raw (unpadded) rollouts
     2. Second pass: pad all rollouts to the longest prompt+response length
     """
-    model.eval().freeze()
-    prompt_tokens = tokenizer.encode(prompt)
-    prompt_len = len(prompt_tokens)
+    rollout_model.eval().freeze()
     
     sampler = make_sampler(
         temp=TrainConfig.TEMPERATURE,
@@ -699,75 +616,76 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
     else:
         logits_processors = None
     
-    gen_cache = set()
-    
     # === FIRST PASS: Collect raw rollouts without padding ===
     # raw_tokens: prompt + response (unpadded, variable length)
     # raw_masks: 2 for prompt tokens, 1 for response tokens, 0 for padding
     # raw_logprobs: 0 for prompt, actual logprobs for response tokens
     raw_tokens, raw_masks, raw_logprobs, rollout_rewards = [], [], [], []
-    max_sample_step = group_size * 2
-    # if dynamic_sampling:
-        # max_sample_step *= 3
+    gen_cache = set()
+    effective_group_size = TrainConfig.GROUP_SIZE // TrainConfig.BATCH_SIZE
     
     # print("--- PROMPT ---")
     # print(prompt)
 
-    for gitr in range(max_sample_step):
-        response_text = ""
-        response_tokens = []
-        response_logprob = []
+    for prompt, scorer in zip(prompts, scorers):
+        prompt_tokens = tokenizer.encode(prompt)
+        prompt_len = len(prompt_tokens)
+        for gitr in range(effective_group_size):
+            response_text = ""
+            response_tokens = []
+            response_logprob = []
 
-        for resp in stream_generate(
-            model=model, 
-            tokenizer=tokenizer_mlx, 
-            prompt=prompt_tokens, 
-            max_tokens=TrainConfig.GEN_LEN,
-            sampler=sampler,
-            logits_processors=logits_processors
-        ):
-            response_text += resp.text
-            response_tokens.append(resp.token)
-            response_logprob.append(resp.logprobs)
-        
-        if response_text in gen_cache:
-            continue
-        gen_cache.add(response_text)
+            for resp in stream_generate(
+                model=rollout_model, 
+                tokenizer=tokenizer_mlx, 
+                prompt=prompt_tokens, 
+                max_tokens=TrainConfig.GEN_LEN,
+                sampler=sampler,
+                logits_processors=logits_processors
+            ):
+                response_text += resp.text
+                response_tokens.append(resp.token)
+                response_logprob.append(resp.logprobs)
+            
+            if response_text in gen_cache:
+                continue
+            gen_cache.add(response_text)
 
+            # print(f"--- RESPONSE ({len(gen_cache)}) ---")
+            # print(response_text)
+            
+            # Reward: -1 if didn't stop properly, otherwise use scorer
+            if resp.finish_reason != 'stop' or response_tokens[-1] != tokenizer.eos_token_id:
+                reward = -1.0
+            else:
+                reward = float(scorer(response_text, False))
+            # print("Reward:", reward)
+            
+            if dynamic_sampling and not (0 < reward < 1):
+                continue
 
-        # print(f"--- RESPONSE ({len(gen_cache)}) ---")
-        # print(response_text)
-        
-        # Reward: -1 if didn't stop properly, otherwise use scorer
-        if resp.finish_reason != 'stop' or response_tokens[-1] != tokenizer.eos_token_id:
-            reward = -1.0
-        else:
-            reward = float(scorer(response_text, False))
-        # print("Reward:", reward)
-        
-        if dynamic_sampling and not (0 <= reward < 1):
-            continue
-
-        response_tokens = mx.array(response_tokens)
-        response_logprob = mx.array(response_logprob)
-        response_len = len(response_tokens)
-        
-        # Concatenate prompt + response (no padding yet)
-        full_tokens = mx.concatenate([mx.array(prompt_tokens), response_tokens])
-        
-        # Mask: 2 = prompt tokens (ignored in loss), 1 = response tokens (train), 0 = padding (ignore in loss)
-        mask = mx.concatenate([mx.full(prompt_len, 2, dtype=mx.int32), mx.full(response_len, 1, dtype=mx.int32)])
-        
-        # Extract logprobs for the actual generated tokens (prompt logprobs = 0)
-        logprobs_slice = mx.take_along_axis(response_logprob, response_tokens[:, None], axis=-1).squeeze(-1)
-        logprobs = mx.concatenate([mx.zeros(prompt_len, dtype=mx.float32), logprobs_slice])
-        
-        raw_tokens.append(full_tokens)
-        raw_masks.append(mask)
-        raw_logprobs.append(logprobs)
-        rollout_rewards.append(reward)
-        
-        if len(rollout_rewards) == group_size:
+            response_tokens = mx.array(response_tokens)
+            response_logprob = mx.array(response_logprob)
+            response_len = len(response_tokens)
+            
+            # Concatenate prompt + response (no padding yet)
+            full_tokens = mx.concatenate([mx.array(prompt_tokens), response_tokens])
+            
+            # Mask: 2 = prompt tokens (ignored in loss), 1 = response tokens (train), 0 = padding (ignore in loss)
+            mask = mx.concatenate([mx.full(prompt_len, 2), mx.full(response_len, 1)])
+            
+            # Extract logprobs for the actual generated tokens (prompt logprobs = 0)
+            logprobs_slice = mx.take_along_axis(response_logprob, response_tokens[:, None], axis=-1).squeeze(-1)
+            logprobs = mx.concatenate([mx.zeros(prompt_len), logprobs_slice])
+            
+            raw_tokens.append(full_tokens)
+            raw_masks.append(mask)
+            raw_logprobs.append(logprobs)
+            rollout_rewards.append(reward)
+            
+            if len(rollout_rewards) == effective_group_size:
+                break
+        if len(rollout_rewards) == effective_group_size:
             break
     
     # Handle edge case: no valid rollouts
@@ -787,6 +705,8 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
     # === Find max length for dynamic padding ===
     if TrainConfig.DYNAMIC_PADDING:
         max_prompt_answer_len = max(len(t) for t in raw_tokens)
+        # rem = max_prompt_answer_len % 8
+        # max_prompt_answer_len += (8 - rem)
     else:
         max_prompt_answer_len = TrainConfig.MAX_INPUT_LEN + TrainConfig.GEN_LEN
         
@@ -797,9 +717,9 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
         padding_needed = max_prompt_answer_len - len(full_tokens)
         if padding_needed > 0:
             # Pad tokens with pad_token_id, mask/logprobs with zeros
-            full_tokens = mx.concatenate([full_tokens, mx.full(padding_needed, tokenizer.pad_token_id, dtype=full_tokens.dtype)])
-            mask = mx.concatenate([mask, mx.zeros(padding_needed, dtype=mx.int32)])
-            logprobs = mx.concatenate([logprobs, mx.zeros(padding_needed, dtype=mx.float32)])
+            full_tokens = mx.concatenate([full_tokens, mx.full(padding_needed, tokenizer.pad_token_id)])
+            mask = mx.concatenate([mask, mx.zeros(padding_needed)])
+            logprobs = mx.concatenate([logprobs, mx.zeros(padding_needed)])
         
         rollout_tokens.append(full_tokens)
         rollout_mask.append(mask)
@@ -822,15 +742,11 @@ def rollout_batch(prompt, scorer, tokenizer, model, group_size, dynamic_sampling
 
 def grpo_train_loop(
     model,
+    model_old,
     tokenizer,
     optimizer,
     train_set,
-    model_ref=None,
     max_iters=3000,
-    group_size=8,
-    batch_size=2,
-    beta=0.0,
-    max_ans_len=4,
     prev_iters=0,
     losses=[],
     learning_rates=[],
@@ -841,11 +757,6 @@ def grpo_train_loop(
 ):
     """Main GRPO training loop."""
     
-    accum_grads = None
-    if model_ref is not None and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
-        model_ref.update(model.parameters())
-        model_ref.eval().freeze()
-    
     # Create a grad function for the trainable model
     loss_and_grad_fn = nn.value_and_grad(model, grpo_loss_fn)
     tot_loss = sum(losses)
@@ -854,7 +765,7 @@ def grpo_train_loop(
     # if TrainConfig.TQDM:
     pbar = tqdm.tqdm(
         # range(prev_iters, max_iters, batch_size),
-        total=max_iters // batch_size,
+        total=max_iters // TrainConfig.BATCH_SIZE,
         initial=prev_iters,
         )
 
@@ -864,12 +775,14 @@ def grpo_train_loop(
     while len(losses) < TrainConfig.ITERS:
         # Evaluation
         if len(losses) % TrainConfig.EVAL_STEPS == 0 and not skipped:
-            eval_greedy = evaluate(model, runs=1, temp=0)
+            eval_temp = 0
+            eval_scores = evaluate(model, runs=1, temp=eval_temp)
             eval_rewards.append({
                 'iter': len(losses),
-                'temperature': 0,
-                'eval_score': sum(eval_greedy)/len(eval_greedy)
+                'temperature': eval_temp,
+                'eval_score': sum(eval_scores)/len(eval_scores)
             })
+            print(f"\nEval Score: {sum(eval_scores)/len(eval_scores):.6f}")
 
             # Saving when this is the best checkpoint
             all_eval_rewards = [x['eval_score'] for x in eval_rewards]
@@ -923,71 +836,57 @@ def grpo_train_loop(
         skipped = True
         # 1. Sample a batch of prompts
         # batch_indices = [bi % len(train_set) for bi in range(it, it + batch_size)]
-        batch_index = random.choice(range(len(train_set)))
+        batch_indices = random.choices(range(len(train_set)), k=TrainConfig.GROUP_SIZE*2)
 
         # 2. Rollout: Generate G responses for each prompt using the model/old_model
-        prompt = train_set[batch_index%len(train_set)]['prompt']
-        scorer = train_set[batch_index]['scorer']
+        prompts = [train_set[bidx%len(train_set)]['prompt'] for bidx in batch_indices]
+        scorers = [train_set[bidx%len(train_set)]['scorer'] for bidx in batch_indices]
         rollout_tokens, rollout_mask, rollout_logprobs, rollout_rewards, advantages = rollout_batch(
-            prompt=prompt,
-            scorer=scorer, 
+            prompts=prompts,
+            scorers=scorers, 
             tokenizer=tokenizer, 
-            model=model_old if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1 else model,
-            group_size=group_size
+            rollout_model=model_old if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1 else model
         )
 
-        if len(rollout_rewards) < 2: # group_size // 2:
+        if len(rollout_rewards) < TrainConfig.GROUP_SIZE:
             print(f"Not enough samples to train: {[round(x, 2) for x in rollout_rewards]}. Skipping...", flush=True)
             continue
         if min(rollout_rewards) == max(rollout_rewards):
             print(f"\nNo diversity in group rewards: {[round(x, 2) for x in rollout_rewards]}. Skipping...", flush=True)
             continue
 
-        print("\nRollouts:", [round(x, 2) for x in rollout_rewards])
-        print(train_set[batch_index%len(train_set)]['prompt'])
-        prompt_len = len(tokenizer.encode(train_set[batch_index%len(train_set)]['prompt']))
-        for re, rt in zip(rollout_rewards, rollout_tokens):
-            response_decoded = tokenizer.decode(rt[prompt_len:].tolist())
-            while response_decoded.endswith('<|endoftext|>'):
-                response_decoded = response_decoded.removesuffix('<|endoftext|>')
-            print(f"{re:.2f}: --> {response_decoded}")
-            print("---")
-        print()
+        # print("\nRollouts:", [round(x, 2) for x in rollout_rewards])
+        # # print(train_set[batch_index%len(train_set)]['prompt'])
+        # # prompt_len = len(tokenizer.encode(train_set[batch_index%len(train_set)]['prompt']))
+        # for re, rt in zip(rollout_rewards, rollout_tokens):
+        #     response_decoded = tokenizer.decode(rt.tolist())
+        #     while response_decoded.endswith('<|endoftext|>'):
+        #         response_decoded = response_decoded.removesuffix('<|endoftext|>')
+        #     print(f"{re:.2f}: --> {response_decoded}")
+        #     print("---")
+        # print()
 
         # Optimization Step
         _loss = 0
         for _ in range(TrainConfig.NUM_MODEL_UPDATE_MU):
+            model.train().unfreeze()
+            mx.eval(model)
             loss, grads = loss_and_grad_fn(
-                model=model,
-                model_ref=model_ref,
+                model_train=model,
                 rollout_tokens=rollout_tokens,
                 rollout_mask=rollout_mask,
                 rollout_logprobs=rollout_logprobs,
                 advantages=advantages,
-                beta=beta,
             )
             if TrainConfig.GRAD_NORM is not None:
                 grads, total_norm = optim.clip_grad_norm(grads, max_norm=TrainConfig.GRAD_NORM)
                 del total_norm
 
-            if TrainConfig.GRAD_ACCUM == 1:
-                optimizer.update(model, grads)
-                mx.eval(model, optimizer.state)
-            else:
-                if accum_grads is not None:
-                    accum_grads = tree_map(mx.add, grads, accum_grads)
-                else:
-                    accum_grads = grads
-                mx.eval(accum_grads)
-                if len(losses) % TrainConfig.GRAD_ACCUM == 0:
-                    accum_grads = tree_map(lambda g: (TrainConfig.GRAD_ACCUM / TrainConfig.BATCH_SIZE) * g, accum_grads)
-                    optimizer.update(model, accum_grads)
-                    mx.eval(model.parameters(), optimizer.state)
-                    accum_grads = None
-            
+            optimizer.update(model, grads)
+            mx.eval(model, optimizer)
+
             _loss += (loss.item() / TrainConfig.NUM_MODEL_UPDATE_MU)
             skipped = False
-
         
         # Logging
         learning_rates.append(optimizer.learning_rate.item())
@@ -1003,16 +902,8 @@ def grpo_train_loop(
             )
             pbar.update(TrainConfig.BATCH_SIZE)
         del grads, loss
-
-        # Sync old model weights
-        if TrainConfig.BETA > 0 and TrainConfig.REF_MODEL_MIXUP_ALPHA != 0:
-            model_ref.update(interpolate_models(model_ref, model, TrainConfig.REF_MODEL_MIXUP_ALPHA))
-            mx.eval(model_ref.state)
-            model_ref.eval().freeze()
-            print(f"\nIter {len(losses)+1}: Synced ref model weights.")
         
         if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1 and len(losses) % TrainConfig.MODEL_WEIGHT_UPDATE_FREQ == 0:
-            
             model_old.update(model.parameters())
             mx.eval(model_old.state)
             model_old.eval().freeze()
@@ -1048,7 +939,7 @@ def grpo_train_loop(
     return losses, all_rewards, max_rewards
 
 
-model.unfreeze()
+model.train().unfreeze()
 mx.eval(model)
 # print(model)
 
@@ -1087,14 +978,10 @@ print(f"Trainable Parameters: {trainable_params:,} ({(trainable_params/total_par
 
 losses, all_rewards, max_rewards = grpo_train_loop(
     model=model,
-    model_ref=model_ref,
+    model_old=model_old,
     tokenizer=tokenizer,
     optimizer=optimizer,
     train_set=train_ds,
-    max_ans_len=TrainConfig.GEN_LEN,
-    group_size=TrainConfig.GROUP_SIZE,
-    beta=TrainConfig.BETA,
-    batch_size=TrainConfig.BATCH_SIZE,
     max_iters=TrainConfig.ITERS,
     prev_iters=iter_step,
     losses=losses,
