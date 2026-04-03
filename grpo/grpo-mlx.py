@@ -64,13 +64,13 @@ class TrainConfig:
     GEN_LEN: int = 128 # 384
     SAVE_FREQ: int = 50
     LOAD_PREV: bool = False
-    LEARNING_RATE: float = 1e-6
-    WEIGHT_DECAY: float = 0.1
+    LEARNING_RATE = 5e-7
+    WEIGHT_DECAY: float = 0.01
     EPSILON_MIN: float = 0.2      # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
     EPSILON_HIGH: float = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
     GROUP_SIZE: int = 8
     WARMUP_STEPS: int = 50
-    DECAY_STEPS: int = 40
+    DECAY_STEPS: int = 960
     EVAL_STEPS: int = 25
     NUM_MODEL_UPDATE_MU: int = 1   # Number of backpropagations per question/rollout
     MODEL_WEIGHT_UPDATE_FREQ: int = 1 # After how many iters old_model should be synced
@@ -85,11 +85,11 @@ class TrainConfig:
     EVAL_SAMPLES: int = 100
     TQDM: bool = True
     STD_NORM: bool = True
-    TEMPERATURE: float = 0.4 # 0.8
+    TEMPERATURE: float = 0.4
     MIN_P: float | None = None
     TOP_K: int | None = None
     TOP_P: float = 0.9 #0.9
-    REPETITION_PENALTY: float = 1.05
+    REPETITION_PENALTY: float = 1.0
 
 
 assert 0 < TrainConfig.GRAD_NORM or TrainConfig.GRAD_NORM is not None
@@ -153,43 +153,49 @@ def linear_decay_with_warmup(
     return schedule
 
 
-scheduler = linear_decay_with_warmup(
-    base_lr=TrainConfig.LEARNING_RATE,
-    total_steps=(TrainConfig.ITERS * TrainConfig.NUM_MODEL_UPDATE_MU * TrainConfig.GROUP_SIZE) // TrainConfig.BATCH_SIZE,
-    warmup_steps=TrainConfig.WARMUP_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU,
-    decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
-)
+if isinstance(TrainConfig.LEARNING_RATE, float):
+    scheduler = linear_decay_with_warmup(
+        base_lr=TrainConfig.LEARNING_RATE,
+        total_steps=(TrainConfig.ITERS * TrainConfig.NUM_MODEL_UPDATE_MU * TrainConfig.GROUP_SIZE) // TrainConfig.BATCH_SIZE,
+        warmup_steps=TrainConfig.WARMUP_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU,
+        decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
+    )
+    optimizer = optim.AdamW(
+        learning_rate=scheduler, weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+    )
+elif isinstance(TrainConfig.LEARNING_RATE, list):
+    # Interesting writings:
+    # * https://huggingface.co/blog/onekq/muon-optimizer
+    # * https://www.lakernewhouse.com/writing/muon-2
+    # * https://kellerjordan.github.io/posts/muon/
+    # * https://varunneal.github.io/essays/muon
+    # * https://github.com/KellerJordan/Muon
+    scheduler_adam = linear_decay_with_warmup(
+        base_lr=TrainConfig.LEARNING_RATE[0],
+        total_steps=(TrainConfig.ITERS * TrainConfig.NUM_MODEL_UPDATE_MU * TrainConfig.GROUP_SIZE) // TrainConfig.BATCH_SIZE,
+        warmup_steps=TrainConfig.WARMUP_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU,
+        decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
+    )
 
-scheduler_muon = linear_decay_with_warmup(
-    base_lr=TrainConfig.LEARNING_RATE * 10 * 2, #0.001, 0.01, 0.02, 1e-3,
-    total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
-    warmup_steps=TrainConfig.WARMUP_STEPS,
-    decay_steps=TrainConfig.DECAY_STEPS
-)
+    scheduler_muon = linear_decay_with_warmup(
+        base_lr=TrainConfig.LEARNING_RATE[1], #* 10 * 2, #0.001, 0.01, 0.02, 1e-3,
+        total_steps=TrainConfig.ITERS // TrainConfig.BATCH_SIZE,
+        warmup_steps=TrainConfig.WARMUP_STEPS,
+        decay_steps=TrainConfig.DECAY_STEPS
+    )
 
-optimizer = optim.AdamW(
-    learning_rate=scheduler, weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
-)
-
-# Interesting writings:
-# * https://huggingface.co/blog/onekq/muon-optimizer
-# * https://www.lakernewhouse.com/writing/muon-2
-# * https://kellerjordan.github.io/posts/muon/
-# * https://varunneal.github.io/essays/muon
-# * https://github.com/KellerJordan/Muon
-
-# optimizer = optim.MultiOptimizer(
-#     [        
-#         optim.Muon(
-#             learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
-#         ),
-#         optim.AdamW(
-#             learning_rate=scheduler, betas=[0.9, 0.999], weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
-#         )
-#     ],
-#     # Where muon will be applied
-#     [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
-# )
+    optimizer = optim.MultiOptimizer(
+        [        
+            optim.Muon(
+                learning_rate=scheduler_muon, weight_decay=TrainConfig.WEIGHT_DECAY
+            ),
+            optim.AdamW(
+                learning_rate=scheduler_adam, weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
+            )
+        ],
+        # Where muon will be applied
+        [lambda name, weight: weight.ndim >= 2 and 'embed' not in name and 'norm' not in name]
+    )
 
 
 if TrainConfig.GENERATE_DATA:
@@ -210,8 +216,9 @@ if TrainConfig.GENERATE_DATA:
 
     
     # --- Tool Call ---
-    sz = int(ds_size * 2.5)
-    # train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=True, k_shot=False)
+    sz = int(ds_size * 0.25)
+    train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=False, k_shot=False)
+    sz = int(ds_size * 0.75)
     train_ds += txt360_toolcall(tokenizer=tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN)
     # sz = int(ds_size * 0.25)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
@@ -262,7 +269,7 @@ def evaluate(eval_model, runs=4, temp=0):
 
     for idx in tqdm.tqdm(range(len(eval_ds)), leave=False):
         data = eval_ds[idx]
-        prompt_lead = "```json\n"
+        prompt_lead = '' #"```json\n"
         prompt_tokens = tokenizer.encode(data['prompt'] + prompt_lead)
         scorer = data['scorer']
         for _ in range(runs):
@@ -536,14 +543,14 @@ def grpo_loss_fn(
     rollout_logprobs = mx.array(rollout_logprobs) if not isinstance(rollout_logprobs, mx.array) else rollout_logprobs
     
     # Forward pass: get logits for all tokens
-    logits = model_train(rollout_tokens)
+    next_token_logits = model_train(rollout_tokens)
     
     # Shift logits by 1 for next-token prediction (token at position t predicts token at t+1)
-    log_probs = nn.log_softmax(logits, axis=-1)
+    next_token_log_probs = nn.log_softmax(next_token_logits, axis=-1)
     # tokens = mx.argmax(log_probs, axis=-1)
     # log_probs[t] contains probability of t+1'th token:          log_probs[t-1]:(t)   |          log_probs[t]:(t+1) | ...
     # rollout_logprobs[t] contain probability of t'th token: rollout_logprobs[t]:(t)   | rollout_logprobs[t+1]:(t+1) | ...
-    log_probs = mx.roll(log_probs, shift=1, axis=-1)
+    log_probs = mx.roll(next_token_log_probs, shift=1, axis=-1)
     # tokens = mx.roll(tokens, shift=1, axis=-1)
     
     # Gather logprobs for the actual tokens (select prob of token_id from vocabulary distribution)
@@ -565,7 +572,8 @@ def grpo_loss_fn(
     advantages = mx.expand_dims(advantages, axis=1) * response_mask
     
     # === Policy gradient loss ===
-    if TrainConfig.MODEL_WEIGHT_UPDATE_FREQ > 1:
+    if TrainConfig.NUM_MODEL_UPDATE_MU > 1:
+    # if True:
         old_logprobs = mx.stop_gradient(log_probs_for_loss)
         # DAPO - Decoupled Clip and Dynamic sAmpling Policy Optimization: https://arxiv.org/pdf/2503.14476
         # Token-level GRPO: ratio = exp(new_logprob - old_logprob)
@@ -836,7 +844,7 @@ def grpo_train_loop(
         skipped = True
         # 1. Sample a batch of prompts
         # batch_indices = [bi % len(train_set) for bi in range(it, it + batch_size)]
-        batch_indices = random.choices(range(len(train_set)), k=TrainConfig.GROUP_SIZE*2)
+        batch_indices = random.choices(range(len(train_set)), k=TrainConfig.GROUP_SIZE * 16)
 
         # 2. Rollout: Generate G responses for each prompt using the model/old_model
         prompts = [train_set[bidx%len(train_set)]['prompt'] for bidx in batch_indices]
