@@ -58,13 +58,13 @@ from utils.tokenizer import get_tokenizer
 class TrainConfig:
     """Training configuration for GRPO."""
     # Iterations
-    ITERS: int = 1_000
+    ITERS: int = 500
     GENERATE_DATA: bool = False
     BATCH_SIZE: int = 1
     GEN_LEN: int = 128 # 384
     SAVE_FREQ: int = 50
     LOAD_PREV: bool = False
-    LEARNING_RATE = 5e-7
+    LEARNING_RATE = 1e-6
     WEIGHT_DECAY: float = 0.01
     EPSILON_MIN: float = 0.2      # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
     EPSILON_HIGH: float = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
@@ -153,12 +153,34 @@ def linear_decay_with_warmup(
     return schedule
 
 
+def cosine_decay_with_warmup(
+    base_lr: float,
+    total_steps: int,
+    warmup_steps: int,
+    min_lr: float = 0.0,
+):
+    def schedule(step):
+        # Linear warmup
+        linear_warmup = base_lr * step / warmup_steps
+        # Cosine decay
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        cosine_decay = 0.5 * (1 + mx.cos(mx.pi * progress))
+        cosine_decay = (base_lr - min_lr) * cosine_decay + min_lr
+        return mx.where(
+            step < warmup_steps,
+            linear_warmup,
+            cosine_decay
+        )
+
+    return schedule
+
+
 if isinstance(TrainConfig.LEARNING_RATE, float):
-    scheduler = linear_decay_with_warmup(
+    scheduler = cosine_decay_with_warmup(#linear_decay_with_warmup(
         base_lr=TrainConfig.LEARNING_RATE,
         total_steps=(TrainConfig.ITERS * TrainConfig.NUM_MODEL_UPDATE_MU * TrainConfig.GROUP_SIZE) // TrainConfig.BATCH_SIZE,
         warmup_steps=TrainConfig.WARMUP_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU,
-        decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
+        # decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
     )
     optimizer = optim.AdamW(
         learning_rate=scheduler, weight_decay=TrainConfig.WEIGHT_DECAY, eps=1e-12
