@@ -178,7 +178,7 @@ def cosine_decay_with_warmup(
 if isinstance(TrainConfig.LEARNING_RATE, float):
     scheduler = cosine_decay_with_warmup(#linear_decay_with_warmup(
         base_lr=TrainConfig.LEARNING_RATE,
-        total_steps=(TrainConfig.ITERS * TrainConfig.NUM_MODEL_UPDATE_MU * TrainConfig.GROUP_SIZE) // TrainConfig.BATCH_SIZE,
+        total_steps=TrainConfig.ITERS,
         warmup_steps=TrainConfig.WARMUP_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU,
         # decay_steps=TrainConfig.DECAY_STEPS * TrainConfig.NUM_MODEL_UPDATE_MU
     )
@@ -238,9 +238,9 @@ if TrainConfig.GENERATE_DATA:
 
     
     # --- Tool Call ---
-    sz = int(ds_size * 0.25)
-    train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=False, k_shot=False)
-    sz = int(ds_size * 0.75)
+    # sz = int(ds_size * 0.25)
+    # train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=False, k_shot=False)
+    sz = int(ds_size * 2.0)
     train_ds += txt360_toolcall(tokenizer=tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN)
     # sz = int(ds_size * 0.25)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
