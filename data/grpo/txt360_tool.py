@@ -132,7 +132,7 @@ def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None):
             return None
 
         return {
-            "prompt": apply_chat_template(messages), # + [{"role": "assistant", "content": "```json\n"}]),
+            "prompt": apply_chat_template(messages), #+ random.choice([{"role": "assistant", "content": "```json\n"}, {}])) ,
             "messages": messages,
             "def_tools": tools,
             "ground_tool_call": ground_tool_calls,
@@ -188,7 +188,9 @@ from data.grpo.verifiers import validate_format, tool_scorer, thinking_validate
 
 
 def scorer(llm_gen, llm_judge, tools_ground, def_tools):
-    # llm_gen = """```json\n""" + llm_gen
+    prefix = """```json\n"""
+    if not llm_gen.startswith(prefix):
+        llm_gen = prefix + llm_gen
     valid_format = validate_format(llm_gen)
     if not valid_format:
         # print("Invalid format")

@@ -58,23 +58,23 @@ from utils.tokenizer import get_tokenizer
 class TrainConfig:
     """Training configuration for GRPO."""
     # Iterations
-    ITERS: int = 500
-    GENERATE_DATA: bool = False
+    ITERS: int = 2_000
+    GENERATE_DATA: bool = True
     BATCH_SIZE: int = 1
-    GEN_LEN: int = 128 # 384
+    GEN_LEN: int = 384
     SAVE_FREQ: int = 50
     LOAD_PREV: bool = False
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 1e-5 #2e-6
     WEIGHT_DECAY: float = 0.01
-    EPSILON_MIN: float = 0.2      # Sequence/GSPO: 3e-4 | GRPO: 0.2 |   Note: Should not be changed
-    EPSILON_HIGH: float = 0.272   # Sequence/GSPO: 4e-4 | GRPO: 0.272 | Note: Can be changed 
+    EPSILON_MIN: float = 0.2      # GRPO: 0.2   |   Note: Should not be changed
+    EPSILON_HIGH: float = 0.272   # GRPO: 0.272 | Note: Can be changed 
     GROUP_SIZE: int = 8
     WARMUP_STEPS: int = 50
     DECAY_STEPS: int = 960
     EVAL_STEPS: int = 25
-    NUM_MODEL_UPDATE_MU: int = 1   # Number of backpropagations per question/rollout
-    MODEL_WEIGHT_UPDATE_FREQ: int = 1 # After how many iters old_model should be synced
-    GRAD_NORM: float | None = 1 #0.01
+    NUM_MODEL_UPDATE_MU: int = 1        # Number of backpropagations per question/rollout
+    MODEL_WEIGHT_UPDATE_FREQ: int = 1   # After how many iters old_model should be synced - EPSILON/clip is only used when > 1
+    GRAD_NORM: float | None = 1
     MAX_INPUT_LEN: int = 384
     SAVE_PATH: str = "weights/NanoAgent-135M-nemotron-grpo"
     DATA_PATH: str = "data/datasets/grpo_cache.pickle"
@@ -228,8 +228,8 @@ if TrainConfig.GENERATE_DATA:
     # # sz = int(ds_size * 0.4)
     # # train_ds += autoif_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1)
     # # train_ds = sorted(train_ds, key=lambda x: len(x['prompt']), reverse=True)#[:sz]
-    # # sz = int(ds_size * 1.0)
-    # train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
+    sz = int(ds_size * 0.25)
+    train_ds += ifeval_ds(tokenizer, TrainConfig.MAX_INPUT_LEN, n_instructions=1, kshot=False)#[:sz]
     # # sz = int(ds_size * 0.4)
     # # train_ds += sorted(general_chat_ds(tokenizer, TrainConfig.MAX_INPUT_LEN), key=lambda x: len(x['prompt']), reverse=True)[:sz]
     # # random.shuffle(train_ds)
@@ -238,9 +238,9 @@ if TrainConfig.GENERATE_DATA:
 
     
     # --- Tool Call ---
-    # sz = int(ds_size * 0.25)
-    # train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=False, k_shot=False)
-    sz = int(ds_size * 2.0)
+    sz = int(ds_size * 0.25)
+    train_ds += salesfores_toolcall(tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN, n_tool_inputs=6, dedupe_ratio=None, think=False, k_shot=False)
+    sz = int(ds_size * 1.0)
     train_ds += txt360_toolcall(tokenizer=tokenizer, prompt_token_len=TrainConfig.MAX_INPUT_LEN)
     # sz = int(ds_size * 0.25)
     # train_ds += tool_calling_traces(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
@@ -248,12 +248,12 @@ if TrainConfig.GENERATE_DATA:
     # train_ds += mobileactions(tokenizer, TrainConfig.MAX_INPUT_LEN)[:sz]
 
     # --- Math Mix ---
-    # sz = int(ds_size * 0.25)
-    # train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.25)
+    train_ds += alice_in_wonderland(tokenizer=tokenizer, size=sz, think=False)
     # # sz = int(ds_size * 0.1)
     # # train_ds += syllogism(tokenizer, size=sz, think=False)
-    # sz = int(ds_size * 0.3)
-    # train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
+    sz = int(ds_size * 0.25)
+    train_ds += gsm_symbolic(tokenizer, size=sz, think=False)
     # # sz = int(ds_size * 0.15)
     # # train_ds += chain_sum(tokenizer, size=sz, think=False)
     # sz = int(ds_size * 0.05) # 0.1
@@ -272,6 +272,7 @@ else:
     print(
         f"Dataset loaded from path: {TrainConfig.DATA_PATH} | Dataset length: {len(train_ds)}"
     )
+
 if TrainConfig.EVAL_SAMPLES:
     eval_ds = train_ds[-TrainConfig.EVAL_SAMPLES:]
     train_ds = train_ds[:-TrainConfig.EVAL_SAMPLES]
@@ -291,7 +292,10 @@ def evaluate(eval_model, runs=4, temp=0):
 
     for idx in tqdm.tqdm(range(len(eval_ds)), leave=False):
         data = eval_ds[idx]
-        prompt_lead = '' #"```json\n"
+        # Only add prompt lead / pre-fill tokens if it is a tool call request
+        prompt_lead = "```json\n"
+        if prompt_lead not in data['prompt']:
+            prompt_lead = ''
         prompt_tokens = tokenizer.encode(data['prompt'] + prompt_lead)
         scorer = data['scorer']
         for _ in range(runs):
@@ -365,7 +369,7 @@ def prog_graph(
         all_rewards + std_rewards,
         color="tab:blue",
         alpha=0.15,
-        label="±1 Std"
+        label="± std"
     )
     axes[1].plot(all_rewards, alpha=1, color="tab:blue", label='Reward (batch-mean)')
 
@@ -378,8 +382,8 @@ def prog_graph(
     axes[1].set_title("Rewards")
     axes[1].legend()
     axes[1].grid(True)
-    axes[1].set_ylim(top=1.0)
-    axes[1].set_ylim(bottom=0)
+    # axes[1].set_ylim(top=1.0)
+    # axes[1].set_ylim(bottom=0)
 
     # axes[2].scatter(itrs, eval_sampling, color="tab:green", linewidth=2, marker="x")
     # axes[2].plot(itrs, eval_sampling, color="tab:green", alpha=0.6, linestyle='--', linewidth=2)
@@ -658,6 +662,8 @@ def rollout_batch(prompts, scorers, tokenizer, rollout_model, dynamic_sampling=T
     # print(prompt)
 
     for prompt, scorer in zip(prompts, scorers):
+        if "```json\n" in prompt:
+            prompt += random.choice(["```json\n", ""])
         prompt_tokens = tokenizer.encode(prompt)
         prompt_len = len(prompt_tokens)
         for gitr in range(effective_group_size):

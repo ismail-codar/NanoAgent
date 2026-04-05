@@ -19,8 +19,9 @@ CURR_FPATH = Path(__file__).parent.resolve()
 BFCL_DATA_DIR = Path("/opt/homebrew/lib/python3.11/site-packages/bfcl_eval/data")
 
 # MODEL_PATH = "weights/SmolLM2-135M-Instruct-nemotron-instruct-fc-instruct-sft"
+# MODEL_PATH = "weights/NanoAgent-135M-nemotron-sft"
 # MODEL_PATH = "quwsarohi/NanoAgent-135M"
-MODEL_PATH = "weights/NanoAgent-135M-nemotron-grpo/best_checkpoint"
+MODEL_PATH = "weights/NanoAgent-135M-nemotron-grpo-toolcall/best_checkpoint"
 
 OUTPUT_DIR = CURR_FPATH.parent / 'results' / 'bfcl' / MODEL_PATH.split('/')[-1].lower().replace('-', '__')
 
@@ -118,10 +119,10 @@ def generate_response(model, tokenizer, messages, max_new_tokens=384, prompt_lea
             outputs = model.generate(
                 inputs.to('mps'),
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.1,
-                min_p=0.2,
-                repetition_penalty=1.05,
+                do_sample=False,
+                # temperature=0.1,
+                # min_p=0.2,
+                # repetition_penalty=1.0,
             )
         
         response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
@@ -171,8 +172,8 @@ def run_evaluation(model, tokenizer, categories=None):
             response = generate_response(model, tokenizer, messages)
 
             # Check if response contains a tool call
-            # has_tool_call = '```json' in response and '[{' in response
-            has_tool_call = '<tool_call>' in response and '[{' in response
+            has_tool_call = '```json' in response and '[{' in response
+            # has_tool_call = '<tool_call>' in response and '[{' in response
             if has_tool_call:
                 tool_calls += 1
 

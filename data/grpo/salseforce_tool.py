@@ -72,6 +72,9 @@ def salesfores_toolcall(tokenizer, prompt_token_len, n_tool_calls=2, n_tool_inpu
             },
             {"role": "user", "content": data["query"]},
         ]
+
+        # seq += random.choice([{"role": "assistant", "content": "```json\n"}, {}])
+
         if think:
             seq.append({"role": "assistant", "content": "Okay,"})
         
@@ -117,13 +120,14 @@ from .verifiers import validate_format, tool_scorer, thinking_validate
 def scorer(llm_gen, llm_judge, tools_ground, def_tools, think):
     # Adding think tag (prefilled in dataset)
     if think:
-        # llm_gen = "<think>" + llm_gen
-        # Validate format
         valid_format = validate_format(llm_gen)
-        # print("Invalid format:", llm_gen, flush=True)
         if not valid_format:
             return -1
     
+    prefix = "```json\n"
+    if not llm_gen.startswith(prefix):
+        llm_gen = prefix + llm_gen
+
     # Tool score
     tool_score, tools_gen = tool_scorer(llm_gen, tools_ground, def_tools)
     if not think:
@@ -133,12 +137,6 @@ def scorer(llm_gen, llm_judge, tools_ground, def_tools, think):
         return tool_score
     
     think_score = 0
-    # think_score = thinking_scorer(llm_gen, tools_gen, def_tools)
-    # think_score = int(thinking_validate(llm_gen))
-    # if think_score <= 0:
-        # print("Invalid thinking", flush=True)
-        # return tool_score
-
     return tool_score + think_score
 
 
