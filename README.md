@@ -164,14 +164,14 @@ tools = [
 TOOL_TEMPLATE = """You are a helpful AI assistant. You have a set of possible tools that you can execute to retrieve information or to perform specific actions. You can execute zero or more tools to answer user question.
 
 Here are the list of tools that you have access to:
-```json
+````json
 {tools}
-```
+````
 
 Only execute tools from above. Follow the below JSON signature to execute tools:
-```json
+````json
 [{{"name": "tool_name", "arguments": {{"arg1": "val1", ...}}}}, ...]
-```
+````
 """
 
 messages = [
@@ -180,9 +180,9 @@ messages = [
 ]
 response = inference(messages, max_new_tokens=512)
 print(response)
-# Output: ```json
+# Output: ````json
 # [{"name": "web_search", "arguments": {"query": "latest AI news 2026"}}]
-# ```
+# ````
 ```
 
 
