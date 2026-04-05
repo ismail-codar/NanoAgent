@@ -111,95 +111,127 @@ def get_llm_response(messages, think=False, n_tokens=2):
 #         and (text.count("```json\n") == 1) \
 #         and (text.count("\n```") == 1)
 
-def validate_format(text):
+def validate_format(text, reasoning=False):
     """
     Validate if the text strictly follows the pattern:
-    <think> ... </think><tool_call> ... </tool_call>
-
+    Think string
+    ```json
+    [{}]
+    ```
     Returns True if the string matches the pattern, False otherwise.
     """
-    pattern = re.compile(
-        r"^\s*\S[\s\S]*?```json\s.*?\s```$", re.DOTALL
-    )
+    if reasoning:
+        pattern = re.compile(
+            r"^\s*\S[\s\S]*?```json\s.*?\s```$", re.DOTALL
+        )
+    else:
+        pattern = re.compile(r"^.*?\s*```json\s.*?\s```$", re.DOTALL)
+
     return bool(pattern.match(text)) \
         and (text.count("```json\n") == 1) \
         and (text.count("```") == 2)
 
 
 def tool_scorer(llm_gen, tools_ground, def_tools, verbose=False):
-    try:
-        return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
-    except Exception as E:
-        print("Exception:", E, '| Input:', llm_gen, '| Ground:', tools_ground)
-        return 0, None
+    # try:
+    return _tool_scorer(llm_gen, tools_ground, def_tools, verbose)
+    # except Exception as E:
+    #     print("Exception:", E, '| Input:', llm_gen, '| Ground:', tools_ground)
+    #     return 0, None
 
 
 def _tool_scorer(llm_gen, tools_ground, def_tools, threshold, verbose=False):
+    # verbose = True
     def uniform(s:str):
         return sorted(list(s.lower()))
+    
+    def tool_matcher(tool_gen: dict, tool_grnd: dict):
+        target_score = len(tool_grnd['arguments']) + 1e-9
+        gen_score = 0
+        if tool_gen['name'] != tool_grnd['name']: return 0
+        for k, v in tool_gen['arguments'].items():
+            if k in tool_grnd['arguments']:
+                type_match = int(type(v) is type(tool_grnd['arguments'][k]))
+                match_score = SequenceMatcher(None, str(v), str(tool_grnd['arguments'][k])).ratio()
+                gen_score += max((type_match+match_score)/2, 0.2)
+            else:
+                # Add a penalty for extra attribute
+                gen_score -= 0.1
+        
+        # No need
+        # Check for missed ground tool attributes -> points would not be added
+        # for k, v in tool_grnd['arguments'].items():
+        #     if k not in tool_gen['arguments']:
+        #         gen_score -= 0.05
+        
+        # Check for ground tool required attribtue
+        req_ground_attribs = tool_grnd.get('parameters', {}).get('required', [])
+        for ra in req_ground_attribs:
+            if ra not in tool_gen['arguments']:
+                gen_score -= 0.1
 
-    if verbose:
-        print("Gen tools:", type(llm_gen), json.dumps(llm_gen))
-        print("Ground tools:", type(tools_ground), json.dumps(tools_ground))
+        return max(min(gen_score / target_score, 1), 0)
 
     assert isinstance(llm_gen, str)
+    assert isinstance(tools_ground, list)
     tools_gen = parse_tool_calls(llm_gen)
-    if verbose:
-        print("Parsed toolcall:", type(tools_gen), json.dumps(tools_gen))
-    tool_ground_names = [t['name'] for t in tools_ground]
-    tools_ground_args = {t['name']:t['arguments'] for t in tools_ground}
-    req_ground_attribs = {t['name']:t.get('parameters', {}).get('required', []) for t in def_tools}
-    total_score = 0
-    args_score = []
+    # if isinstance(tools_ground, str):
 
     if tools_gen is None:
+        if verbose: print("Tool generated is not parsable:", llm_gen, flush=True)
         return 0, None
-    if len(tools_gen) != len(tools_ground):
-        return 0, None
-
-    # Scoring:
-    # -2: Major mistakes -> Wrong format | imaginary tools | invalid tool call signature
-    # -1: Minor mistakes -> wrong arguments | 
+    # if len(tools_gen) != len(tools_ground):        
+    #     return 0, None
 
     a = str(tools_gen)
     b = str(tools_ground)
-
     if uniform(a) == uniform(b):
+        # print("Tool generated exact match with ground", flush=True)
         return 1, tools_gen
-    
-    for tool in tools_gen:
+
+    total_score = 0
+    taken = set()
+    matches = []
+
+    for i, gen_tool in enumerate(tools_gen):
         # Invalid tool calling format
-        if not isinstance(tool, dict):
+        if not isinstance(gen_tool, dict):
             return 0, None
         # Name/args missing
-        if 'name' not in tool or 'arguments' not in tool:
+        if 'name' not in gen_tool or 'arguments' not in gen_tool:
             return 0, None
         # Not a dict
-        if not isinstance(tool.get('arguments', {}), dict):
+        if not isinstance(gen_tool.get('arguments', {}), dict):
             return 0, None
-        # Invalid tool call
-        if tool.get('name', None) not in tool_ground_names:
-            return 0, None
-        # Invalid arguments
-        tool_name = tool['name']
-        for param_name, gen_val in tool.get('arguments', {}).items():
-            if param_name not in tools_ground_args.get(tool_name, {}):
-                return 0, None
-            ground_val = tools_ground_args.get(tool_name, {}).get(param_name)
-            sim_score = cosine_similarity_tfidf(str(gen_val), str(ground_val))
-            args_score.append(sim_score if type(gen_val) is type(ground_val) else 0)
-            
-        # TODO: Missing required attribs
-        for param_name in req_ground_attribs.get(tool_name, []):
-            if param_name not in tool['arguments']:
-                # print(param_name, 'missing in', llm_gen)
-                total_score += -0.05
+        # Wrong tool invoked
+        if gen_tool['name'] not in [t['name'] for t in tools_ground]:
+            if verbose: print(gen_tool['name'], "-> wrong tool invoked")
+            total_score -= 0.1
+            continue
+        
+        k = -1
+        best_score = 0
+        for j, grnd_tool in enumerate(tools_ground):
+            if j in taken: continue
+            score = tool_matcher(gen_tool, grnd_tool)
+            if score > best_score:
+                k = j
+                best_score = score
+        if k != -1:
+            taken.add(k)
+            matches.append((i, k, best_score))
+            total_score += best_score
+    
+    total_score_normed = total_score / (len(tools_ground) + 1e-9)
 
-    # s = SequenceMatcher(None, a, b)
-    # seq_match = (s.find_longest_match().size / len(b))
-    total_score += (sum(args_score) / len(args_score))
-    # total_score = seq_match * 0.25 + max(total_score, 0) * 0.75
-    return max(min(total_score, 1), 0), tools_gen
+    if verbose:
+        print("Parsed toolcall:", json.dumps(tools_gen))
+        print("Ground toolcall:", json.dumps(tools_ground))
+        print("Matches:", matches)
+        print("Total score:", total_score)
+        print("Target score:", total_score_normed)
+
+    return max(min(total_score_normed, 1), 0), tools_gen
 
 
 def thinking_validate(llm_gen):

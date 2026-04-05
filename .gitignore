@@ -184,3 +184,5 @@ weights/
 data/datasets/
 benchmarks/results
 lm-evaluation-harness/
+/mergekit
+AGENTS.md

@@ -18,7 +18,10 @@ CURR_FPATH = Path(__file__).parent.resolve()
 BFCL_DATA_DIR = Path("/opt/homebrew/lib/python3.11/site-packages/bfcl_eval/data")
 
 # MODEL_PATH = "weights/SmolLM2-135M-Instruct-nemotron-instruct-fc-instruct-sft"
-MODEL_PATH = "quwsarohi/NanoAgent-135M"
+# MODEL_PATH = "quwsarohi/NanoAgent-135M"
+MODEL_PATH = "weights/NanoAgent-135M-nemotron-grpo-toolcall/best_checkpoint"
+# MODEL_PATH = "weights/NanoAgent-135M-nemotron-sft"
+
 
 RESULT_DIR = OUTPUT_DIR = CURR_FPATH.parent / 'results' / 'bfcl' / MODEL_PATH.split('/')[-1].lower().replace('-', '__')
 

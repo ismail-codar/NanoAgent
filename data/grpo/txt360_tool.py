@@ -13,8 +13,7 @@ from utils.tokenizer import TOOL_TEMPLATE
 from utils.tools import parse_tool_calls
 
 
-def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None, k_shot=False):
-    
+def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None):
     apply_chat_template = lambda seq: tokenizer.apply_chat_template(
         seq,
         add_generation_prompt=True,
@@ -77,7 +76,7 @@ def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None, k_shot=False
                                 try:
                                     arguments = json.loads(arguments)
                                 except:
-                                    arguments = {}
+                                    return None
                             parsed_calls.append({'name': name, 'arguments': arguments})
                         else:
                             return None
@@ -133,7 +132,7 @@ def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None, k_shot=False
             return None
 
         return {
-            "prompt": apply_chat_template(messages),
+            "prompt": apply_chat_template(messages), #+ random.choice([{"role": "assistant", "content": "```json\n"}, {}])) ,
             "messages": messages,
             "def_tools": tools,
             "ground_tool_call": ground_tool_calls,
@@ -165,12 +164,6 @@ def txt360_toolcall(tokenizer, prompt_token_len, dedupe_ratio=None, k_shot=False
         except Exception as e:
             print(f"Deduplication failed: {e}")
 
-    if k_shot:
-        print("Applying k-shot examples...")
-        for i in range(len(train_ds)):
-            rand_ds = random.choice(train_ds)
-            train_ds[i]['messages'] = rand_ds['messages'] + train_ds[i]['messages']
-            train_ds[i]['prompt'] = apply_chat_template(train_ds[i]['messages'])
     # Optional: filter by prompt_token_len using rough estimate (char length / 4)
     if prompt_token_len > 0:
         print(f"Filtering by token length ({prompt_token_len})...")
@@ -195,9 +188,13 @@ from data.grpo.verifiers import validate_format, tool_scorer, thinking_validate
 
 
 def scorer(llm_gen, llm_judge, tools_ground, def_tools):
+    prefix = """```json\n"""
+    if not llm_gen.startswith(prefix):
+        llm_gen = prefix + llm_gen
     valid_format = validate_format(llm_gen)
     if not valid_format:
-        return -1
+        # print("Invalid format")
+        return 0
     
     tool_score, tools_gen = tool_scorer(llm_gen, tools_ground, def_tools)
     return tool_score

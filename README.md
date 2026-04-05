@@ -141,7 +141,7 @@ print(inference(messages))
 ### Tool Calling
 NanoAgent uses a JSON-based tool calling format:
 
-```python
+````python
 import json
 
 tools = [
@@ -180,10 +180,11 @@ messages = [
 ]
 response = inference(messages, max_new_tokens=512)
 print(response)
+
 # Output: ```json
 # [{"name": "web_search", "arguments": {"query": "latest AI news 2026"}}]
 # ```
-```
+````
 
 
 ## 🧭 Roadmap
