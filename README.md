@@ -91,17 +91,19 @@ Each dataset retains its original license, and use of those datasets is subject 
 
 | Category | Accuracy | Correct/Total |
 |----------|----------|---------------|
-| **Overall** | 24.35% | 609/2501 |
-| parallel | 50.50% | 101/200 |
-| parallel_multiple | 48.00% | 96/200 |
-| simple_python | 33.75% | 135/400 |
-| simple_javascript | 32.00% | 16/50 |
-| multiple | 25.00% | 50/200 |
-| live_simple | 24.03% | 62/258 |
-| simple_java | 22.00% | 22/100 |
-| live_parallel | 18.75% | 3/16 |
-| live_parallel_multiple | 16.67% | 4/24 |
-| live_multiple | 11.40% | 120/1053 |
+| **Overall** | 28.99% | 725/2501 |
+| parallel | 56.50% | 113/200 |
+| parallel_multiple | 54.50% | 109/200 |
+| simple_python | 41.50% | 166/400 |
+| simple_javascript | 40.00% | 20/50 |
+| multiple | 31.50% | 63/200 |
+| live_simple | 28.29% | 73/258 |
+| simple_java | 27.00% | 27/100 |
+| live_parallel | 37.50% | 6/16 |
+| live_parallel_multiple | 25.00% | 6/24 |
+| live_multiple | 13.49% | 142/1053 |
+
+*All evaluations were conducted using greedy decoding (sampling parameter was set to false during HuggingFace inference).
 
 ### Key Findings
 
@@ -200,27 +202,31 @@ print(response)
 
 ```
 NanoAgent/
-├── data/
-│   ├── dataprep.py          # Dataset preparation, cleaning, and formatting
-│   └── utils.py             # Helper utilities for data processing
-│
-├── grpo/
-│   └── grpo-mlx.py          # Experimental GRPO (agentic fine-tuning) implementation using MLX
-│
-├── notebooks/
-│   └── inference.ipynb      # Demo notebook for inference and evaluation
-│
-├── sft/
-│   └── train-mlx.py         # Supervised Fine-Tuning (SFT) training script using MLX
-│
-├── utils/
-│   ├── gguf_conv.py         # Conversion script for exporting model to GGUF format (for llama.cpp etc.)
-│   ├── tokenizer.py         # Tokenizer helper functions and configs
-│   └── webtool.py           # Example tool interface for web search / parsing integration
-│
-├── LICENSE                  # Apache 2.0 license file
-├── NOTICE                   # Notices and attributions for datasets and dependencies
-└── README.md                # Project overview, usage guide, and dataset details
+├── benchmarks/              # Benchmark results and evaluations
+│   └── results/
+│       └── bfcl/
+├── config/                 # Configuration files
+│   ├── lm_eval/
+│   └── mergekit/
+├── data/                   # Dataset preparation and processing
+│   ├── dataprep.py
+│   ├── grpo/               # GRPO-specific tools and data
+│   └── utils.py
+├── grpo/                   # GRPO training scripts
+│   └── grpo-mlx.py
+├── notebooks/              # Jupyter notebooks
+│   └── inference.ipynb
+├── sft/                    # Supervised Fine-Tuning
+│   └── train-mlx.py
+├── utils/                  # Utility scripts
+│   ├── gguf_conv.py
+│   ├── tokenizer.py
+│   └── webtool.py
+├── weights/                # Model weights
+├── LICENSE                 # Apache 2.0 license
+├── NOTICE                  # Notices and attributions
+├── README.md               # Project overview
+└── requirements.txt        # Python dependencies
 ```
 
 ---
